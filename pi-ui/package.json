@@ -1,0 +1,16 @@
+{
+  "name": "pi-ui",
+  "version": "0.1.0",
+  "description": "Pi extension: opinionated UX layer for pi-toolkit. Bundles the Catppuccin Frappé theme and replaces pi's default multi-line footer with a one-line condensed status (cwd, branch, model, thinking, tokens, cost).",
+  "private": true,
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/pi-ui.ts"],
+    "themes": ["./themes"]
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "typescript": "^5.4.0"
+  }
+}

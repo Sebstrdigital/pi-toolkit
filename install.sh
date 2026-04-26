@@ -10,6 +10,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROLES_SRC="$REPO_ROOT/pi-roles"
 CHAINS_SRC="$REPO_ROOT/pi-chains"
+UI_SRC="$REPO_ROOT/pi-ui"
 SKILLS_DEST="$HOME/.pi/agent/skills"
 
 if ! command -v pi >/dev/null 2>&1; then
@@ -41,20 +42,24 @@ for role_dir in "$ROLES_SRC"/*/; do
   ln -s "${role_dir%/}" "$link"
 done
 
-echo
-echo "==> Installing pi-chains extension"
-if [ ! -f "$CHAINS_SRC/package.json" ]; then
-  echo "error: $CHAINS_SRC/package.json missing" >&2
-  exit 1
-fi
+install_pi_package() {
+  local label="$1" path="$2"
+  echo
+  echo "==> Installing $label extension"
+  if [ ! -f "$path/package.json" ]; then
+    echo "error: $path/package.json missing" >&2
+    exit 1
+  fi
+  if [ ! -d "$path/node_modules" ]; then
+    echo "    Running npm install in $path"
+    (cd "$path" && npm install --no-audit --no-fund)
+  fi
+  echo "    Running: pi install $path"
+  pi install "$path"
+}
 
-if [ ! -d "$CHAINS_SRC/node_modules" ]; then
-  echo "    Running npm install in $CHAINS_SRC"
-  (cd "$CHAINS_SRC" && npm install --no-audit --no-fund)
-fi
-
-echo "    Running: pi install $CHAINS_SRC"
-pi install "$CHAINS_SRC"
+install_pi_package "pi-chains" "$CHAINS_SRC"
+install_pi_package "pi-ui" "$UI_SRC"
 
 echo
 echo "==> Setting catppuccin-frappe as the active pi theme"

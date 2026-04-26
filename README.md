@@ -6,6 +6,7 @@ Toolkit for working productively with [pi](https://github.com/badlogic/pi-mono/t
 
 - **`pi-roles/`** — library of role skills (scout, architect, builder, verifier, reviewer, debugger). Markdown only. Symlinked into pi's skill discovery paths. Reusable standalone (`/skill:scout`) or composed inside chains.
 - **`pi-chains/`** — pi extension that reads YAML chain definitions and runs roles sequentially via `child_process.spawn("pi", ...)`. Surfaces `/chain-run`, `/chain-list`, `/chain-resume`.
+- **`pi-ui/`** — pi extension: Catppuccin Frappé theme + one-line condensed footer (cwd, branch, model, thinking, tokens used / window, cost or `FREE`). Independent of pi-chains; install whichever you want.
 
 Workflow consumers (takt, audit, refactor, ad-hoc chains) live in their own repos and reference these primitives.
 

@@ -8,5 +8,10 @@ pi-chains/node_modules/
 pi-chains/dist/
 pi-chains/package-lock.json
 
+# pi-ui build/install
+pi-ui/node_modules/
+pi-ui/dist/
+pi-ui/package-lock.json
+
 # Phase 4 spike artifacts
 pi-chains/spike-runs/

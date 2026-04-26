@@ -7,8 +7,7 @@
   "keywords": ["pi-package"],
   "pi": {
     "extensions": ["./src/pi-chains.ts"],
-    "skills": [],
-    "themes": ["./themes"]
+    "skills": []
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "*",
