@@ -1,8 +1,14 @@
 # pi-roles — Role Library v1
 
-**Status:** Draft for Sebastian sign-off (Phase 0 deliverable). Do NOT proceed to Phase 1 SKILL.md authoring until this is reviewed.
+**Status:** Signed off 2026-04-26. Cleared for Phase 1 SKILL.md authoring.
 
 **Date:** 2026-04-26.
+
+**Sign-off notes:**
+- Tier names approved: `worker-grade` / `critic-grade` / `architect-grade`.
+- Builder bash lockout kept for v1 (verifier owns test runs).
+- Architect kept in v1 but Sebastian will rarely invoke it — keep the spec lean; revisit after spike.
+- Reviewer reads **diff** (not full files) via `git diff`, mirroring human PR review. Tools updated to include `bash` for read-only git inspection only.
 
 ---
 
@@ -142,10 +148,10 @@
 
 | Field | Value |
 |---|---|
-| Tools | `read grep find ls` |
+| Tools | `read bash grep find ls` |
 | Tier | critic-grade (reasoning + judgment; second candidate for model upgrade) |
 
-**Inputs.** Verifier's verdict (`$INPUT`). Original task (`$ORIGINAL`). May read the diff and source.
+**Inputs.** Verifier's verdict (`$INPUT`). Original task (`$ORIGINAL`). Reads the diff via `git diff` (default `<base>..HEAD` or `--staged`) — same as a human PR review. May `read` specific files if the diff alone is insufficient context.
 
 **Outputs.** Review doc:
 - **Decision** — `APPROVE` / `REJECT` (single line)
@@ -154,7 +160,8 @@
 - **Required changes** (only if REJECT) — concrete list
 
 **Behavioral rules (will not).**
-- Will NOT edit, run, or write
+- Will NOT edit or write
+- Will use `bash` ONLY for read-only git inspection (`git diff`, `git log`, `git show`) — never to run tests, builds, or any state-changing command
 - Will NOT bikeshed — concerns must be actionable, not stylistic preference
 - Will NOT auto-approve PASS verdicts without checking task fit (verifier proves tests pass, reviewer proves *the right thing* was built)
 
@@ -204,9 +211,9 @@
 
 ## Open items for Sebastian
 
-1. **Tier names.** Using `worker-grade / critic-grade / architect-grade`. OK or rename?
-2. **Bash for verifier+debugger only?** That's the v1 split. Confirm: builder is intentionally locked out of `bash` (test runs delegated to verifier). Trade-off: extra chain step vs cleaner role boundaries.
-3. **Architect kept for v1?** Per question 6 above. Confirm before SKILL.md authoring.
-4. **Reviewer sees diff or full files?** v1 = full files (simpler). Could pipe `git diff` via prompt later.
+1. **Tier names.** Using `worker-grade / critic-grade / architect-grade`. OK or rename? Ok!
+2. **Bash for verifier+debugger only?** That's the v1 split. Confirm: builder is intentionally locked out of `bash` (test runs delegated to verifier). Trade-off: extra chain step vs cleaner role boundaries. Ok for now!
+3. **Architect kept for v1?** Per question 6 above. Confirm before SKILL.md authoring. We can add the architect but i will not run it so much now!
+4. **Reviewer sees diff or full files?** v1 = full files (simpler). Could pipe `git diff` via prompt later. Diff should be enough, that is what humans usally do when reviewing PRs!
 
 After sign-off → Phase 1: write 6 SKILL.md files in `pi-roles/`.
