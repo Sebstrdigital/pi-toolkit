@@ -47,28 +47,59 @@ export default function (pi: ExtensionAPI): void {
 			.join("\n");
 		ctx.ui.notify(`[Chains]\n${list}\n\nRun: /chain-run <name> <prompt>   List: /chain-list`, "info");
 
-		// One-line condensed footer: <cwd> (<branch>) │ <model> │ <thinking> │ <ctx%>
+		// One-line condensed footer:
+		//   <cwd> (<branch>) │ <model> │ <thinking> │ <tokens>/<window> (<pct>%) │ <cost>
 		let cachedBranch = gitBranch(ctx.cwd);
-		let cachedCtxPct: number | null = null;
+		let cachedTokens: number | null = null;
+		let cachedPct: number | null = null;
 		let footerText: Text | null = null;
+
+		const fmtTokens = (n: number): string => {
+			if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+			if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+			return `${n}`;
+		};
+
+		const isFreeModel = (): boolean => {
+			const c = (ctx.model as any)?.cost;
+			if (!c) return false;
+			return [c.input, c.output, c.cacheRead, c.cacheWrite].every((v) => !v || v === 0);
+		};
+
+		const sessionCost = (): number => {
+			try {
+				const entries = (ctx.sessionManager as any)?.getEntries?.() ?? [];
+				let total = 0;
+				for (const e of entries) {
+					const cost = e?.message?.usage?.cost?.total ?? e?.usage?.cost?.total;
+					if (typeof cost === "number") total += cost;
+				}
+				return total;
+			} catch {
+				return 0;
+			}
+		};
 
 		const buildFooter = (): string => {
 			const cwd = shortCwd(ctx.cwd);
 			const branch = cachedBranch ? ` (${cachedBranch})` : "";
 			const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "—";
-			const thinking = pi.getThinkingLevel?.() ?? "";
-			const pct = cachedCtxPct !== null ? `${cachedCtxPct.toFixed(0)}%` : "—";
+			const thinking = pi.getThinkingLevel?.() || "off";
+			const window = (ctx.model as any)?.contextWindow ?? 0;
+			const tokenStr =
+				cachedTokens !== null && window
+					? `${fmtTokens(cachedTokens)}/${fmtTokens(window)} (${(cachedPct ?? 0).toFixed(0)}%)`
+					: "—";
+			const cost = isFreeModel() ? "FREE" : `$${sessionCost().toFixed(4)}`;
 			const sep = " │ ";
-			return `${cwd}${branch}${sep}${model}${sep}${thinking || "off"}${sep}ctx ${pct}`;
+			return `${cwd}${branch}${sep}${model}${sep}${thinking}${sep}${tokenStr}${sep}${cost}`;
 		};
 
 		ctx.ui.setFooter((_tui, theme) => {
 			footerText = new Text("", 0, 0);
 			return {
 				render(width: number): string[] {
-					const raw = buildFooter();
-					const colored = theme.fg("muted", raw);
-					footerText!.setText(colored);
+					footerText!.setText(theme.fg("muted", buildFooter()));
 					return footerText!.render(width);
 				},
 				invalidate() {
@@ -77,11 +108,12 @@ export default function (pi: ExtensionAPI): void {
 			};
 		});
 
-		const refreshCtxPct = async () => {
+		const refreshUsage = async () => {
 			try {
 				const usage = await ctx.getContextUsage?.();
-				if (usage && typeof usage.percent === "number") {
-					cachedCtxPct = usage.percent;
+				if (usage) {
+					if (typeof (usage as any).tokens === "number") cachedTokens = (usage as any).tokens;
+					if (typeof (usage as any).percent === "number") cachedPct = (usage as any).percent;
 					footerText?.invalidate();
 				}
 			} catch {
@@ -91,10 +123,10 @@ export default function (pi: ExtensionAPI): void {
 
 		pi.on("turn_end", async () => {
 			cachedBranch = gitBranch(ctx.cwd);
-			await refreshCtxPct();
+			await refreshUsage();
 		});
 		pi.on("model_select", async () => footerText?.invalidate());
-		await refreshCtxPct();
+		await refreshUsage();
 	});
 
 	pi.registerCommand("chain-list", {
