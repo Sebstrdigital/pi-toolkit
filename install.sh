@@ -57,6 +57,22 @@ echo "    Running: pi install $CHAINS_SRC"
 pi install "$CHAINS_SRC"
 
 echo
+echo "==> Setting catppuccin-frappe as the active pi theme"
+SETTINGS="$HOME/.pi/agent/settings.json"
+if [ -f "$SETTINGS" ] && command -v node >/dev/null 2>&1; then
+  node -e '
+    const fs = require("fs");
+    const path = process.argv[1];
+    const s = JSON.parse(fs.readFileSync(path, "utf8"));
+    s.theme = "catppuccin-frappe";
+    fs.writeFileSync(path, JSON.stringify(s, null, 2) + "\n");
+  ' "$SETTINGS"
+  echo "    theme = catppuccin-frappe ($SETTINGS)"
+else
+  echo "    skipped — $SETTINGS not present (start pi once, then re-run installer)"
+fi
+
+echo
 echo "==> Done."
 echo "    Skills installed: $(ls -1 "$SKILLS_DEST" | wc -l | tr -d ' ')"
 echo "    Try: pi, then /chain-list"

@@ -13,6 +13,8 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -23,6 +25,19 @@ import { listInstalledRoles } from "./role-resolver.ts";
 
 const EXTENSION_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+function shortCwd(cwd: string): string {
+	const home = homedir();
+	return cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
+}
+
+function gitBranch(cwd: string): string | null {
+	try {
+		return execSync("git rev-parse --abbrev-ref HEAD 2>/dev/null", { cwd, encoding: "utf8" }).trim() || null;
+	} catch {
+		return null;
+	}
+}
+
 export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		const chains = discoverChains(EXTENSION_DIR, ctx.cwd);
@@ -31,6 +46,55 @@ export default function (pi: ExtensionAPI): void {
 			.map((c) => `  ${c.name} (${c.steps.map((s) => s.role).join(" → ")})`)
 			.join("\n");
 		ctx.ui.notify(`[Chains]\n${list}\n\nRun: /chain-run <name> <prompt>   List: /chain-list`, "info");
+
+		// One-line condensed footer: <cwd> (<branch>) │ <model> │ <thinking> │ <ctx%>
+		let cachedBranch = gitBranch(ctx.cwd);
+		let cachedCtxPct: number | null = null;
+		let footerText: Text | null = null;
+
+		const buildFooter = (): string => {
+			const cwd = shortCwd(ctx.cwd);
+			const branch = cachedBranch ? ` (${cachedBranch})` : "";
+			const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "—";
+			const thinking = pi.getThinkingLevel?.() ?? "";
+			const pct = cachedCtxPct !== null ? `${cachedCtxPct.toFixed(0)}%` : "—";
+			const sep = " │ ";
+			return `${cwd}${branch}${sep}${model}${sep}${thinking || "off"}${sep}ctx ${pct}`;
+		};
+
+		ctx.ui.setFooter((_tui, theme) => {
+			footerText = new Text("", 0, 0);
+			return {
+				render(width: number): string[] {
+					const raw = buildFooter();
+					const colored = theme.fg("muted", raw);
+					footerText!.setText(colored);
+					return footerText!.render(width);
+				},
+				invalidate() {
+					footerText?.invalidate();
+				},
+			};
+		});
+
+		const refreshCtxPct = async () => {
+			try {
+				const usage = await ctx.getContextUsage?.();
+				if (usage && typeof usage.percent === "number") {
+					cachedCtxPct = usage.percent;
+					footerText?.invalidate();
+				}
+			} catch {
+				/* best effort */
+			}
+		};
+
+		pi.on("turn_end", async () => {
+			cachedBranch = gitBranch(ctx.cwd);
+			await refreshCtxPct();
+		});
+		pi.on("model_select", async () => footerText?.invalidate());
+		await refreshCtxPct();
 	});
 
 	pi.registerCommand("chain-list", {
