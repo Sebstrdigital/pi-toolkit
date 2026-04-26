@@ -6,7 +6,7 @@
   "type": "module",
   "keywords": ["pi-package"],
   "pi": {
-    "extensions": ["./src/index.ts"],
+    "extensions": ["./src/pi-chains.ts"],
     "skills": []
   },
   "devDependencies": {
