@@ -1,0 +1,29 @@
+name: debug-fix
+description: Bug triage and fix. Debugger investigates and produces a root-cause writeup, builder applies the suggested fix, verifier confirms it.
+steps:
+  - role: debugger
+    prompt: |
+      Bug report: $ORIGINAL
+
+      Investigate. Reproduce if possible. Produce a root-cause writeup with
+      a single suggested fix at a specific path:line. Do not edit code.
+  - role: builder
+    prompt: |
+      Original bug report: $ORIGINAL
+
+      Debugger's root-cause writeup and suggested fix:
+      $INPUT
+
+      Apply the suggested fix. Edit only what the writeup identifies.
+      If the suggested fix is unworkable as written, surface the conflict
+      in your notes and stop — do not improvise an alternative cause.
+  - role: verifier
+    prompt: |
+      Original bug report: $ORIGINAL
+
+      Builder's implementation notes:
+      $INPUT
+
+      Run the failing test (or the reproduction command from the debugger
+      writeup at $STEP[1]) plus the full test suite. Verdict: PASS only if
+      the original bug is fixed AND no regressions surfaced.

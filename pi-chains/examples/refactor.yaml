@@ -1,0 +1,51 @@
+name: refactor
+description: Iterative restructuring. Scout maps the area, architect designs the refactor, builder applies it, verifier checks the suite stays green, reviewer guards against behavior drift.
+steps:
+  - role: scout
+    prompt: |
+      Refactor task: $ORIGINAL
+
+      Map the area to refactor: every caller and consumer of the symbols/
+      modules involved. This is critical — refactors that miss a caller
+      ship as bugs. Cite path:line exhaustively for the change surface.
+  - role: architect
+    prompt: |
+      Refactor task: $ORIGINAL
+
+      Scout findings (full call surface):
+      $INPUT
+
+      Design the refactor. Restructuring only — no behavior changes.
+      Specify: files to change, what each change is, the order to apply
+      them in (to keep the codebase compiling between steps), and any
+      callers that need updating in lockstep.
+  - role: builder
+    prompt: |
+      Refactor task: $ORIGINAL
+
+      Approach (apply in the order specified):
+      $INPUT
+
+      Apply the refactor. Do NOT introduce behavior changes — if you
+      notice a latent bug, note it but leave it for a follow-up. Update
+      every caller the architect identified.
+  - role: verifier
+    prompt: |
+      Refactor task: $ORIGINAL
+
+      Builder's notes:
+      $INPUT
+
+      Run the full test suite. A refactor PASSES only if every previously
+      passing test still passes — no new failures, no skipped tests that
+      weren't skipped before.
+  - role: reviewer
+    prompt: |
+      Refactor task: $ORIGINAL
+
+      Architect's plan: $STEP[2]
+      Verifier's verdict: $INPUT
+
+      Read the diff (git diff). For a refactor the bar is: does the diff
+      restructure without changing behavior? Flag any hunk that looks like
+      a behavior change — even if tests still pass. Decide APPROVE / REJECT.

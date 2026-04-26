@@ -1,0 +1,37 @@
+name: scout-flow
+description: Triple recon. Three independent scout passes — broad map, focused dive, gap fill — composed into one consolidated findings doc. Disler-style stand-in for pi's missing plan mode.
+steps:
+  - role: scout
+    prompt: |
+      Task: $ORIGINAL
+
+      Pass 1 of 3 — BROAD MAP.
+      Map the high-level structure of the codebase relevant to this task:
+      directory layout, entry points, top-level modules, frameworks in play.
+      Stay shallow; depth is for pass 2.
+  - role: scout
+    prompt: |
+      Task: $ORIGINAL
+
+      Pass 2 of 3 — FOCUSED DIVE.
+
+      Pass 1 (broad map) found:
+      $INPUT
+
+      Now go deep on the specific files that matter for this task. Read them
+      fully, cite path:line for every claim, surface the actual control flow,
+      data shapes, and conventions. Do NOT re-list what pass 1 already covered.
+  - role: scout
+    prompt: |
+      Task: $ORIGINAL
+
+      Pass 1 (broad map): $STEP[1]
+
+      Pass 2 (focused dive): $INPUT
+
+      Pass 3 of 3 — GAP FILL + CONSOLIDATION.
+      Identify what passes 1 and 2 missed: missing tests, hidden coupling,
+      undocumented invariants, edge cases, dependencies. Then produce ONE
+      consolidated findings document covering all three passes in the standard
+      scout output format. This consolidated doc is what downstream chains
+      will consume.

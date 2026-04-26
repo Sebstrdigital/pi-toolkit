@@ -1,0 +1,44 @@
+name: plan-build-review
+description: Standard implementation chain. Scout maps the slice, architect designs the change, builder edits, verifier runs tests, reviewer judges the diff.
+steps:
+  - role: scout
+    prompt: |
+      Task: $ORIGINAL
+
+      Map the slice of code relevant to this task. Read-only.
+  - role: architect
+    prompt: |
+      Original task: $ORIGINAL
+
+      Scout findings:
+      $INPUT
+
+      Design the implementation approach. Produce a file-level change plan.
+      No code beyond illustrative snippets.
+  - role: builder
+    prompt: |
+      Original task: $ORIGINAL
+
+      Approach to implement:
+      $INPUT
+
+      Apply the plan. Edit only what the plan specifies. Do not run tests.
+  - role: verifier
+    prompt: |
+      Original task: $ORIGINAL
+
+      Builder's implementation notes:
+      $INPUT
+
+      Run the project's tests and produce the verdict (PASS/FAIL).
+  - role: reviewer
+    prompt: |
+      Original task: $ORIGINAL
+
+      Verifier's verdict:
+      $INPUT
+
+      Architect's plan was: $STEP[2]
+
+      Read the diff (git diff) and judge whether the change actually solves
+      the original task. Decide APPROVE / REJECT.
