@@ -7,6 +7,7 @@ export interface SpawnOptions {
 	prompt: string;
 	sessionFile: string;
 	resumeSession: boolean;
+	cwd: string;
 }
 
 /**
@@ -51,6 +52,7 @@ export function spawnStep(opts: SpawnOptions): Promise<StepResult> {
 	const start = Date.now();
 	return new Promise((resolve) => {
 		const proc = spawn("pi", args, {
+			cwd: opts.cwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env },
 		});

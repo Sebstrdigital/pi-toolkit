@@ -42,6 +42,7 @@ export async function runChain(opts: RunOptions): Promise<ChainResult> {
 			prompt,
 			sessionFile,
 			resumeSession: false,
+			cwd: opts.cwd,
 		});
 		stepResults.push(result);
 		opts.onStepEnd?.(i, result);

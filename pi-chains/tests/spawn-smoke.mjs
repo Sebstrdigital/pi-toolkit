@@ -16,6 +16,7 @@ const result = await spawnStep({
   prompt: "Say only: SMOKE_OK and nothing else.",
   sessionFile: join(sessionDir, "scout.jsonl"),
   resumeSession: false,
+  cwd: process.cwd(),
 });
 console.log("Exit:", result.exitCode, "elapsed:", result.elapsedMs, "ms");
 console.log("Output:");
