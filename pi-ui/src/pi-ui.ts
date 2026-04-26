@@ -79,7 +79,7 @@ export default function (pi: ExtensionAPI): void {
 			return {
 				left: `${cwd}${branch}`,
 				center: `${model} - ${thinking}`,
-				right: `${tokenStr} │ ${cost}`,
+				right: `${tokenStr} / ${cost}`,
 			};
 		};
 
