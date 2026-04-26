@@ -24,6 +24,15 @@ import { listInstalledRoles } from "./role-resolver.ts";
 const EXTENSION_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export default function (pi: ExtensionAPI): void {
+	pi.on("session_start", async (_event, ctx) => {
+		const chains = discoverChains(EXTENSION_DIR, ctx.cwd);
+		if (chains.length === 0) return;
+		const list = chains
+			.map((c) => `  ${c.name} (${c.steps.map((s) => s.role).join(" → ")})`)
+			.join("\n");
+		ctx.ui.notify(`[Chains]\n${list}\n\nRun: /chain-run <name> <prompt>   List: /chain-list`, "info");
+	});
+
 	pi.registerCommand("chain-list", {
 		description: "List available pi-chains",
 		handler: async (_args, ctx) => {
