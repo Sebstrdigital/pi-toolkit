@@ -237,11 +237,24 @@ These are starting points. Users author their own in `.pi-chains/chains/`.
 
 ---
 
-## Phase 4 — Spike + benchmark
+## Phase 4 — Spike + benchmark — ✅ PASSED (2026-04-26)
 
-Run `plan-build-review` against pi-sandbox Challenge 1 with MiniMax m2.5 across all roles. Compare passing test count vs Phase 1 baselines in `~/work/dev/pi-sandbox/BENCHMARKS.md`.
+Ran `plan-build-review` against pi-sandbox Challenge 1 with MiniMax m2.5 across all roles. Bypassed the pi TUI by calling `runChain()` directly from `pi-chains/tests/spike.mjs` against a tmp clone of pi-sandbox.
 
-**Go/no-go on whether m2.5 carries the role-specialized chain.** If it fails, the toolkit still works for stronger models (OpenAI in 2 weeks); we just delay headless use until then.
+**Result:** 26/27 tests pass after the chain. The one failure (`should return empty results for non-existent status`) is a **pre-existing buggy test** in the suite, documented in `pi-sandbox/BENCHMARKS.md` Challenge 3: "One self-contradicting test: sends `?status=nonexistent` but expects 200 — validation correctly returns 400." Not a chain regression.
+
+**Per-step timing (first run, m2.5):**
+- scout: 41s
+- architect: 37s
+- builder: 26s
+- verifier: 1223s ← jest hang (now bounded by per-step timeout, see fix below)
+- reviewer: 2s
+
+**Bugs found by the spike (fixed):**
+1. `spawner.ts` didn't pass `cwd` to `child_process.spawn` — pi ran in the parent's cwd instead of the chain workdir, so all steps looked at the wrong tree. Commit `28844bb`.
+2. `verifier`'s `npm test` triggered the same jest hang seen in `BENCHMARKS.md` Challenge 1. Pi waits indefinitely for the tool call to return. Mitigated by per-step `timeout_sec` in chain YAML (default 10 min, set to 240s on every implementation chain's verifier step). Commit `caf8eb5`.
+
+**Go/no-go: GO.** MiniMax m2.5 carries the role-specialized chain end-to-end on a non-trivial refactor task. Stronger models (OpenAI in ~2 weeks) only widen the margin.
 
 ---
 
