@@ -102,8 +102,9 @@ console.log(`\n[spike] Chain ${result.success ? "complete" : "FAILED"} in ${tota
 let testReport = null;
 if (result.success) {
 	console.log("\n[spike] Running post-chain `npm test` for ground-truth verification…");
-	const t = spawnSync("npm", ["test"], { cwd: workdir, encoding: "utf8" });
-	const out = (t.stdout ?? "") + "\n" + (t.stderr ?? "");
+	const t = spawnSync("npm", ["test"], { cwd: workdir, encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL" });
+	const timedOut = t.signal === "SIGKILL";
+	const out = (t.stdout ?? "") + "\n" + (t.stderr ?? "") + (timedOut ? "\n[spike] npm test killed after 120s timeout (jest --forceExit not enough; same hang seen in pi-sandbox BENCHMARKS Challenge 1)" : "");
 	writeFileSync(join(runDir, "test-output.txt"), out);
 	const passMatch = out.match(/(\d+)\s+passing/i) ?? out.match(/Tests:\s+\d+\s+failed,\s+(\d+)\s+passed/i) ?? out.match(/Tests:\s+(\d+)\s+passed/i);
 	const failMatch = out.match(/(\d+)\s+failing/i) ?? out.match(/Tests:\s+(\d+)\s+failed/i);
