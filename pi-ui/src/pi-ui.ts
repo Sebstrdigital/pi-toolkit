@@ -65,7 +65,7 @@ export default function (pi: ExtensionAPI): void {
 			}
 		};
 
-		const buildFooter = (): string => {
+		const buildSegments = (): { left: string; center: string; right: string } => {
 			const cwd = shortCwd(ctx.cwd);
 			const branch = cachedBranch ? ` (${cachedBranch})` : "";
 			const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "—";
@@ -76,15 +76,30 @@ export default function (pi: ExtensionAPI): void {
 					? `${fmtTokens(cachedTokens)}/${fmtTokens(window)} (${(cachedPct ?? 0).toFixed(0)}%)`
 					: "—";
 			const cost = isFreeModel() ? "FREE" : `$${sessionCost().toFixed(4)}`;
-			const sep = " │ ";
-			return `${cwd}${branch}${sep}${model}${sep}${thinking}${sep}${tokenStr}${sep}${cost}`;
+			return {
+				left: `${cwd}${branch}`,
+				center: `${model} - ${thinking}`,
+				right: `${tokenStr} │ ${cost}`,
+			};
+		};
+
+		// Pad the three segments so left sits at col 0, center is centered, right is flush right.
+		// If the terminal is too narrow to fit all three, fall back to "left  center  right"
+		// joined by two spaces so we never wrap.
+		const layout = (segments: { left: string; center: string; right: string }, width: number): string => {
+			const { left, center, right } = segments;
+			const total = left.length + center.length + right.length;
+			if (width < total + 4) return `${left}  ${center}  ${right}`;
+			const leftCenterPad = Math.max(1, Math.floor((width - center.length) / 2) - left.length);
+			const rightPad = Math.max(1, width - left.length - leftCenterPad - center.length - right.length);
+			return left + " ".repeat(leftCenterPad) + center + " ".repeat(rightPad) + right;
 		};
 
 		ctx.ui.setFooter((_tui, theme) => {
 			footerText = new Text("", 0, 0);
 			return {
 				render(width: number): string[] {
-					footerText!.setText(theme.fg("muted", buildFooter()));
+					footerText!.setText(theme.fg("muted", layout(buildSegments(), width)));
 					return footerText!.render(width);
 				},
 				invalidate() {
