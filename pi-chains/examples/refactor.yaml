@@ -30,6 +30,7 @@ steps:
       notice a latent bug, note it but leave it for a follow-up. Update
       every caller the architect identified.
   - role: verifier
+    timeout_sec: 240
     prompt: |
       Refactor task: $ORIGINAL
 

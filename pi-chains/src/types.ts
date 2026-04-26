@@ -3,6 +3,8 @@ export interface ChainStep {
 	prompt: string;
 	model?: string;
 	provider?: string;
+	/** Wall-clock cap for this step in seconds. Spawner SIGKILLs on overrun. */
+	timeoutSec?: number;
 }
 
 export interface ChainDef {

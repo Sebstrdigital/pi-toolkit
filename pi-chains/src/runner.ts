@@ -43,6 +43,7 @@ export async function runChain(opts: RunOptions): Promise<ChainResult> {
 			sessionFile,
 			resumeSession: false,
 			cwd: opts.cwd,
+			timeoutMs: step.timeoutSec ? step.timeoutSec * 1000 : undefined,
 		});
 		stepResults.push(result);
 		opts.onStepEnd?.(i, result);

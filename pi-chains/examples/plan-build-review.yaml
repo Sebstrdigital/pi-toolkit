@@ -24,13 +24,17 @@ steps:
 
       Apply the plan. Edit only what the plan specifies. Do not run tests.
   - role: verifier
+    timeout_sec: 240
     prompt: |
       Original task: $ORIGINAL
 
       Builder's implementation notes:
       $INPUT
 
-      Run the project's tests and produce the verdict (PASS/FAIL).
+      Run the project's tests and produce the verdict (PASS/FAIL). If a
+      test runner hangs (e.g. jest without --forceExit), kill it after a
+      reasonable timeout and report FAIL with the hang as the cause —
+      do not wait indefinitely.
   - role: reviewer
     prompt: |
       Original task: $ORIGINAL

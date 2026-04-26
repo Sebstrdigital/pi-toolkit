@@ -165,13 +165,18 @@ function advanceAfterField(lines: string[], lineIdx: number, rest: string, inden
 function setStepField(target: Partial<ChainStep>, key: string, value: string): void {
 	if (key === "role" || key === "prompt" || key === "model" || key === "provider") {
 		target[key] = value;
+		return;
+	}
+	if (key === "timeout_sec" || key === "timeoutSec") {
+		const n = parseInt(value, 10);
+		if (Number.isFinite(n) && n > 0) target.timeoutSec = n;
 	}
 }
 
 function finalizeStep(s: Partial<ChainStep>): ChainStep {
 	if (!s.role) throw new Error("step missing 'role'");
 	if (!s.prompt) throw new Error(`step '${s.role}' missing 'prompt'`);
-	return { role: s.role, prompt: s.prompt, model: s.model, provider: s.provider };
+	return { role: s.role, prompt: s.prompt, model: s.model, provider: s.provider, timeoutSec: s.timeoutSec };
 }
 
 function readBlockScalar(

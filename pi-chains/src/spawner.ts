@@ -8,6 +8,8 @@ export interface SpawnOptions {
 	sessionFile: string;
 	resumeSession: boolean;
 	cwd: string;
+	/** Wall-clock cap for this step. SIGKILLs the pi subprocess on overrun. Default: 10 min. */
+	timeoutMs?: number;
 }
 
 /**
@@ -50,12 +52,19 @@ export function spawnStep(opts: SpawnOptions): Promise<StepResult> {
 	args.push(opts.prompt);
 
 	const start = Date.now();
+	const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000;
 	return new Promise((resolve) => {
 		const proc = spawn("pi", args, {
 			cwd: opts.cwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env },
 		});
+
+		let timedOut = false;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			proc.kill("SIGKILL");
+		}, timeoutMs);
 
 		const textChunks: string[] = [];
 		let buffer = "";
@@ -87,15 +96,20 @@ export function spawnStep(opts: SpawnOptions): Promise<StepResult> {
 		});
 
 		proc.on("close", (code) => {
+			clearTimeout(timer);
+			const suffix = timedOut
+				? `\n\n[pi-chains] step exceeded ${Math.round(timeoutMs / 1000)}s timeout — SIGKILL'd. Likely cause: a tool call (e.g. \`npm test\`) hung inside the spawned pi run.`
+				: "";
 			resolve({
 				role: opts.role.name,
-				output: textChunks.join(""),
-				exitCode: code ?? 1,
+				output: textChunks.join("") + suffix,
+				exitCode: timedOut ? 124 : code ?? 1,
 				elapsedMs: Date.now() - start,
 			});
 		});
 
 		proc.on("error", (err) => {
+			clearTimeout(timer);
 			resolve({
 				role: opts.role.name,
 				output: `Error spawning pi: ${err.message}`,

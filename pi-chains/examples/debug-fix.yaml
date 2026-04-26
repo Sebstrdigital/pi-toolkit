@@ -18,6 +18,7 @@ steps:
       If the suggested fix is unworkable as written, surface the conflict
       in your notes and stop — do not improvise an alternative cause.
   - role: verifier
+    timeout_sec: 240
     prompt: |
       Original bug report: $ORIGINAL
 
