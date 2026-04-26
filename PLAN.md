@@ -280,11 +280,21 @@ Detect if pi is installed first; warn and exit if not. (Optional: detect Claude 
 
 ---
 
-## Pi baseline deps (install before this work)
+## Pi baseline deps — installed (2026-04-26)
 
-1. **pi-mcp-adapter** (nicobailon, npm) — bridges MCP servers (jCodeMunch, context-mode, munin, obsidian). `pi install npm:pi-mcp-adapter` (verify exact pkg name).
+1. **pi-mcp-adapter** (nicobailon, npm) — installed via `pi install npm:pi-mcp-adapter`. Bridges MCP servers to pi via a single ~200-token proxy tool with lazy connection (servers don't start until called).
 
-That's it. Nothing else.
+### MCP servers wired (`~/.config/mcp/mcp.json`)
+
+| Server | Command | Purpose |
+|---|---|---|
+| `jcodemunch` | `uvx jcodemunch-mcp` | Token-efficient code navigation (search_symbols, get_file_outline, get_symbol). Replaces grep/glob/read for symbol-level work. |
+| `context-mode` | `npx -y context-mode` | Output compression — keeps large tool responses out of context via sandboxed execution + indexed search. |
+| `munin` | `~/work/git/munin/.venv/bin/munin-mcp` | Semantic project memory — recall/remember across sessions, vector-backed. |
+
+Munin also has a standalone CLI (`munin recall|remember|...`); not wired here yet because the MCP path matches the existing Claude Code flow. CLI route is a candidate for an even lower-context approach later.
+
+That's the full pi baseline.
 
 ---
 
