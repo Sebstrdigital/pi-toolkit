@@ -7,3 +7,6 @@ dist/
 pi-chains/node_modules/
 pi-chains/dist/
 pi-chains/package-lock.json
+
+# Phase 4 spike artifacts
+pi-chains/spike-runs/
