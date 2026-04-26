@@ -1,0 +1,16 @@
+{
+  "name": "pi-chains",
+  "version": "0.1.0",
+  "description": "Pi extension that runs YAML-defined chains of role skills via child_process.spawn",
+  "private": true,
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "skills": []
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "typescript": "^5.4.0"
+  }
+}

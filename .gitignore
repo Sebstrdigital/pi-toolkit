@@ -2,3 +2,8 @@ node_modules/
 dist/
 .DS_Store
 *.log
+
+# pi-chains build/install
+pi-chains/node_modules/
+pi-chains/dist/
+pi-chains/package-lock.json
