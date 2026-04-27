@@ -9,6 +9,7 @@ Reusable primitives for working productively with [pi](https://github.com/badlog
 | [`pi-roles/`](pi-roles/) | Six markdown skill files defining narrow agent roles with hard tool restrictions (`scout`, `architect`, `builder`, `verifier`, `reviewer`, `debugger`). | Discovered as `/skill:<name>` after symlinking into `~/.pi/agent/skills/`. |
 | [`pi-chains/`](pi-chains/) | TS extension that runs YAML-defined chains of role skills via `child_process.spawn("pi", ...)`. Pipes each step's output as `$INPUT` to the next. | `/chain-list`, `/chain-run <name> <prompt>`, `/chain-resume` (stub). |
 | [`pi-ui/`](pi-ui/) | TS extension shipping the Catppuccin Frappé theme and a one-line condensed footer (cwd, branch, model, thinking, tokens, cost / FREE). | Auto-applied on session start. Independent of pi-chains. |
+| [`harness/`](harness/) | Multi-team agent harness — three-tier (orchestrator/lead/worker) team pattern with per-agent front-matter, expertise files, shared team shapes, and a `delegate`/`report`/`done`/`escalate` vocabulary. Shared layer; per-project state lives in `<project>/.harness/`. | Manual relay this week (Claude Code drafts prompts, pi sessions run agents). See [`team-harness-concept.md`](team-harness-concept.md) and [`team-harness-layout.md`](team-harness-layout.md). |
 
 Workflow consumers (takt, ad-hoc audits, etc.) live in their own repos and reference these primitives.
 
