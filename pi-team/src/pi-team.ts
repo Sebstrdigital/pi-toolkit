@@ -21,13 +21,14 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import type { Static } from "typebox";
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAgentDef, withReportsTo, withSystemPromptSuffix, type AgentDef } from "./agent-def.ts";
 import { makeRuntime, sendToAgent, type AgentRuntime } from "./agent-process.ts";
 import { buildRosterPrompt } from "./roster-prompt.ts";
-import { buildHarnessFooter, buildRosterHeader, buildTeamFooter } from "./panes.ts";
+import { buildRosterHeader, buildTeamFooter } from "./panes.ts";
 import { isAddressable, parseAgentMessage } from "./router.ts";
 import { loadTeamConfig, type TeamConfig } from "./team-config.ts";
 import { loadTeamShape, type TeamShape } from "./team-shape.ts";
@@ -100,6 +101,7 @@ export default function (pi: ExtensionAPI): void {
 			// Below-editor: roster (left) + till-done (right), side-by-side.
 			const orchestratorRole = harness.orchestrator.role;
 			const orchestratorModel = harness.orchestrator.model;
+			const location = { cwd: ctx.cwd, branch: detectGitBranch(ctx.cwd) };
 			ctx.ui.setWidget(
 				"pi-team-roster",
 				(tui, theme) => {
@@ -112,15 +114,15 @@ export default function (pi: ExtensionAPI): void {
 						cacheRead: orchestratorUsage.cacheRead,
 						cost: orchestratorUsage.cost,
 						turns: orchestratorUsage.turns,
-					}));
+					}), location);
 				},
 				{ placement: "belowEditor" },
 			);
 
-			// Custom footer: cwd + branch only. Defer so we win against pi-ui's
-			// session_start handler in case it runs after ours.
+			// Suppress pi-ui's separate cwd/branch footer — we render it inline on
+			// the team-summary line of the widget instead.
 			setImmediate(() => {
-				ctx.ui.setFooter((_tui, theme, data) => buildHarnessFooter(theme, ctx.cwd, data.getGitBranch()));
+				ctx.ui.setFooter(() => ({ render: () => [], invalidate: () => {}, dispose: () => {} }));
 			});
 		} catch (err) {
 			ctx.ui.notify(`[pi-team] boot failed: ${(err as Error).message}`, "error");
@@ -476,6 +478,15 @@ function renderTranscript(items: ChainTranscriptItem[]): string {
 		const head = `── @${it.to} ◀ @${it.from} ──`;
 		return `${head}\n${it.text.trim()}`;
 	}).join("\n\n");
+}
+
+function detectGitBranch(cwd: string): string | null {
+	try {
+		const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+		return branch || null;
+	} catch {
+		return null;
+	}
 }
 
 function briefDescription(text: string): string {

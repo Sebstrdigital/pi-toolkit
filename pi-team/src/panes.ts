@@ -45,7 +45,8 @@ export interface OrchestratorUsageView {
 
 /**
  * Below-editor widget: two columns side-by-side.
- *  - Left: per-agent token / cost roster (orchestrator + subagents).
+ *  - Left: per-agent token / cost roster (orchestrator + subagents) with the
+ *    cwd/branch tail appended to the summary line.
  *  - Right: till-done list with `[N/M]` header.
  */
 export function buildTeamFooter(
@@ -53,8 +54,9 @@ export function buildTeamFooter(
 	subagents: AgentRuntime[],
 	tillDone: TillDone,
 	orchestrator: () => OrchestratorUsageView,
+	location: { cwd: string; branch: string | null },
 ): Component {
-	return new TeamFooter(theme, subagents, tillDone, orchestrator);
+	return new TeamFooter(theme, subagents, tillDone, orchestrator, location);
 }
 
 class TeamFooter implements Component {
@@ -63,6 +65,7 @@ class TeamFooter implements Component {
 		private subagents: AgentRuntime[],
 		private tillDone: TillDone,
 		private orchestrator: () => OrchestratorUsageView,
+		private location: { cwd: string; branch: string | null },
 	) {}
 
 	render(width: number): string[] {
@@ -95,27 +98,56 @@ class TeamFooter implements Component {
 			totalCost += a.usage.cost;
 		}
 
+		const home = process.env.HOME ?? "";
+		const shortCwd = home && this.location.cwd.startsWith(home)
+			? `~${this.location.cwd.slice(home.length)}`
+			: this.location.cwd;
+		const branchPart = this.location.branch
+			? th.fg("muted", " (") + th.fg("accent", this.location.branch) + th.fg("muted", ")")
+			: "";
+
 		lines.push(
 			th.fg("accent", "team") +
 				th.fg("muted", " • ") +
 				th.fg("text", `${fmt(totalIn)}↑ ${fmt(totalOut)}↓`) +
 				th.fg("muted", " • ") +
-				th.fg("text", totalCost > 0 ? `$${totalCost.toFixed(4)}` : "FREE"),
+				th.fg("text", totalCost > 0 ? `$${totalCost.toFixed(4)}` : "FREE") +
+				"   " +
+				th.fg("text", shortCwd) +
+				branchPart,
 		);
 
-		const renderRow = (role: string, tier: AgentRuntime["def"]["tier"], turns: number, input: number, cacheRead: number, output: number, cost: number) => {
+		const renderRow = (role: string, tier: AgentRuntime["def"]["tier"], turns: number, input: number, cacheRead: number, output: number, cost: number, indent: number, isLast: boolean) => {
+			const pad = "  ".repeat(indent);
+			const arrow = indent === 0 ? "" : (isLast ? "└─ " : "├─ ");
 			const r = th.fg(colorForTier(tier), `@${role}`);
 			const t = th.fg("muted", `${turns}t`);
 			const i = th.fg("text", `${fmt(input + cacheRead)}↑`);
 			const o = th.fg("text", `${fmt(output)}↓`);
 			const c = cost > 0 ? th.fg("text", `$${cost.toFixed(4)}`) : th.fg("muted", "free");
-			return `  ${r} ${t} ${i} ${o} ${c}`;
+			return `  ${pad}${arrow}${r} ${t} ${i} ${o} ${c}`;
 		};
 
-		lines.push(renderRow(orch.role, "orchestrator", orch.turns, orch.input, orch.cacheRead, orch.output, orch.cost));
+		// Build a tree by reportsTo so the roster matches the header layout.
+		const childrenOf = new Map<string | undefined, AgentRuntime[]>();
 		for (const r of this.subagents) {
-			lines.push(renderRow(r.def.role, r.def.tier, r.usage.turns, r.usage.input, r.usage.cacheRead, r.usage.output, r.usage.cost));
+			const key = r.def.reportsTo;
+			if (!childrenOf.has(key)) childrenOf.set(key, []);
+			childrenOf.get(key)!.push(r);
 		}
+
+		lines.push(renderRow(orch.role, "orchestrator", orch.turns, orch.input, orch.cacheRead, orch.output, orch.cost, 0, true));
+
+		const walk = (parent: string | undefined, depth: number) => {
+			const kids = childrenOf.get(parent) ?? [];
+			kids.forEach((r, idx) => {
+				const isLast = idx === kids.length - 1;
+				lines.push(renderRow(r.def.role, r.def.tier, r.usage.turns, r.usage.input, r.usage.cacheRead, r.usage.output, r.usage.cost, depth, isLast));
+				walk(r.def.role, depth + 1);
+			});
+		};
+		walk(orch.role, 1);
+
 		return lines;
 	}
 
