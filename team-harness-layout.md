@@ -207,21 +207,26 @@ required_project_config:
 
 ### 2.6 `vocabulary.md`
 
+Agents address each other directly inside the chat-room runtime — no human
+relay. The harness parses every line of agent output for these patterns and
+routes accordingly.
+
 ```markdown
 # Harness Vocabulary
 
 A small set of information-dense keywords every agent in the harness understands.
 Keep this list short. Add words only when they pull weight.
 
-## delegate
-Format: `delegate <to-role>: <task>`
-Use: orchestrator → lead, lead → worker.
-Meaning: assign a single concrete task to the named recipient.
+## @mention (delegation / addressing)
+Format: `@<role> <free-text>`
+Use: orchestrator → lead, lead → worker, worker → lead, lead → orchestrator.
+Meaning: the rest of the line is a message routed to that agent. The mention
+IS the routing primitive — no `delegate` keyword, no colon.
 
 ## report
 Format: `report <to-role>: <summary>`
 Use: worker → lead, lead → orchestrator, orchestrator → user.
-Meaning: surface a result, finding, or blocker to the named recipient.
+Meaning: surface a result, finding, or non-blocking issue to the named recipient.
 
 ## done
 Format: `done: <task-id>`
@@ -233,6 +238,11 @@ Format: `escalate <to-role>: <reason>`
 Use: any agent → its parent tier.
 Meaning: "I cannot continue without breaking my rules." Halts the task; the recipient must decide what to do (split, change scope, override a rule, abort). Distinct from `report`, which is used for results — including non-blocking failures.
 ```
+
+> Note: §2.1–2.3 above show the original `delegate` keyword in the inline
+> system-prompt drafts. The live agent files in `harness/agents/` use
+> `@<role>` mentions per this section. The inline copies are kept for
+> historical context only — the live files are authoritative.
 
 ### 2.7 `README.md`
 
@@ -252,10 +262,10 @@ team_shape: minimal-trio
 # Which model each tier runs on. All currently free in pi.
 # Tiering principle: reasoning at the top, fast coder at the bottom.
 models:
-  orchestrator: nemotron-3-super     # reasoning, not coding
-  ui-lead: minimax-m2.5              # capable mid-tier (proven in Phase 4 spike)
-  frontend-worker: ling-2.6-flash    # fast coder
-  # Available alternates: hy3-preview
+  orchestrator: opencode/nemotron-3-super-free   # reasoning, not coding
+  ui-lead: opencode/minimax-m2.5-free            # capable mid-tier (proven in Phase 4 spike)
+  frontend-worker: opencode/ling-2.6-flash-free  # fast coder
+  # Always use provider/model-id format. Bare names default to provider=google and stall.
 
 # Scope globs per worker. Honour-system in week 1 — violations are logged, not blocked.
 scopes:

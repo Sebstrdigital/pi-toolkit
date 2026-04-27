@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROLES_SRC="$REPO_ROOT/pi-roles"
 CHAINS_SRC="$REPO_ROOT/pi-chains"
 UI_SRC="$REPO_ROOT/pi-ui"
+TEAM_SRC="$REPO_ROOT/pi-team"
 SKILLS_DEST="$HOME/.pi/agent/skills"
 
 if ! command -v pi >/dev/null 2>&1; then
@@ -61,6 +62,36 @@ install_pi_package() {
 install_pi_package "pi-chains" "$CHAINS_SRC"
 install_pi_package "pi-ui" "$UI_SRC"
 
+# pi-team is intentionally NOT registered as a global extension — it's loaded
+# explicitly via `pi -e <path>` from the `pi-team` wrapper. This keeps plain
+# `pi` vanilla (no harness boot) while `pi-team` opts into harness mode.
+echo
+echo "==> pi-team extension"
+if [ ! -d "$TEAM_SRC/node_modules" ]; then
+  echo "    Running npm install in $TEAM_SRC"
+  (cd "$TEAM_SRC" && npm install --no-audit --no-fund)
+fi
+echo "    Loaded on-demand by the pi-team wrapper (not globally registered)."
+
+echo
+echo "==> Linking pi-team wrapper into ~/.local/bin"
+mkdir -p "$HOME/.local/bin"
+WRAPPER_SRC="$REPO_ROOT/bin/pi-team"
+WRAPPER_LINK="$HOME/.local/bin/pi-team"
+if [ -L "$WRAPPER_LINK" ] && [ "$(readlink "$WRAPPER_LINK")" = "$WRAPPER_SRC" ]; then
+  echo "    ✓ pi-team (already linked)"
+elif [ -e "$WRAPPER_LINK" ] && [ ! -L "$WRAPPER_LINK" ]; then
+  echo "    ! $WRAPPER_LINK exists and is not a symlink — skipping" >&2
+else
+  [ -L "$WRAPPER_LINK" ] && rm "$WRAPPER_LINK"
+  ln -s "$WRAPPER_SRC" "$WRAPPER_LINK"
+  echo "    + pi-team -> $WRAPPER_SRC"
+fi
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) echo "    note: ~/.local/bin not on PATH; add it or call $WRAPPER_LINK directly" ;;
+esac
+
 echo
 echo "==> Setting catppuccin-frappe as the active pi theme"
 SETTINGS="$HOME/.pi/agent/settings.json"
@@ -70,9 +101,10 @@ if [ -f "$SETTINGS" ] && command -v node >/dev/null 2>&1; then
     const path = process.argv[1];
     const s = JSON.parse(fs.readFileSync(path, "utf8"));
     s.theme = "catppuccin-frappe";
+    s.quietStartup = true;
     fs.writeFileSync(path, JSON.stringify(s, null, 2) + "\n");
   ' "$SETTINGS"
-  echo "    theme = catppuccin-frappe ($SETTINGS)"
+  echo "    theme = catppuccin-frappe, quietStartup = true ($SETTINGS)"
 else
   echo "    skipped — $SETTINGS not present (start pi once, then re-run installer)"
 fi

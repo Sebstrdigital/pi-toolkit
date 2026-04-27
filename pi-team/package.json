@@ -1,0 +1,19 @@
+{
+  "name": "pi-team",
+  "version": "0.1.0",
+  "description": "Pi extension that boots a Dan-style multi-team agent harness from .harness/team.yaml",
+  "private": true,
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/pi-team.ts"],
+    "skills": []
+  },
+  "devDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*",
+    "typescript": "^5.4.0"
+  }
+}

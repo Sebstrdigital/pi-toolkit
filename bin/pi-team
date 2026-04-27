@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# pi-team — pi launcher that loads the pi-team harness extension.
+#
+# Plain `pi` runs vanilla (with whatever extensions are globally registered:
+# pi-ui, pi-chains, pi-mcp-adapter). `pi-team` adds the harness extension via
+# an explicit `-e` flag so the harness only activates when you ask for it.
+#
+# When the cwd has `.harness/team.yaml`, the wrapper additionally:
+#   - pins the orchestrator model from team.yaml
+#   - restricts tools to `plan,mention` so the orchestrator must delegate
+#   - hides pi's startup banners ([Context]/[Skills]/[Prompt Templates])
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || echo "${BASH_SOURCE[0]}")")/.." && pwd)"
+TEAM_EXT="$REPO_ROOT/pi-team/src/pi-team.ts"
+
+if [ ! -f "$TEAM_EXT" ]; then
+  echo "error: pi-team extension not found at $TEAM_EXT" >&2
+  exit 1
+fi
+
+EXTRA=(-e "$TEAM_EXT")
+# Signal to the pi-team extension that harness mode is desired. The extension
+# is a no-op unless this is set, so even an explicit `-e` won't activate it
+# without the wrapper.
+export PI_TEAM_HARNESS=1
+
+if [ -f ".harness/team.yaml" ]; then
+  # Extract the orchestrator model line: `  orchestrator: opencode/foo`
+  ORCH_MODEL="$(awk '
+    $1 == "models:" { in_models = 1; next }
+    in_models && /^[^[:space:]]/ { in_models = 0 }
+    in_models && $1 == "orchestrator:" { print $2; exit }
+  ' .harness/team.yaml)"
+
+  if [ -n "${ORCH_MODEL:-}" ]; then
+    EXTRA+=(--model "$ORCH_MODEL")
+  fi
+  EXTRA+=(--tools plan,mention)
+  EXTRA+=(--no-context-files --no-skills --no-prompt-templates)
+fi
+
+exec pi "${EXTRA[@]}" "$@"
