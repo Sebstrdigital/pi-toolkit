@@ -1,0 +1,19 @@
+name: minimal-trio
+description: One orchestrator, one lead, one worker. Smallest viable team.
+
+agents:
+  - role: orchestrator
+    definition: agents/orchestrator.md
+
+  - role: ui-lead
+    definition: agents/leads/generic-lead.md
+    reports_to: orchestrator
+
+  - role: frontend-worker
+    definition: agents/workers/generic-worker.md
+    reports_to: ui-lead
+
+# Fields the project must fill in during bootstrap (see harness/README.md):
+required_project_config:
+  - scopes        # one path glob per worker
+  - models        # optional per-tier model override (defaults come from agent definitions)
