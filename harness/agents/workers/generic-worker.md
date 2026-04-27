@@ -4,7 +4,8 @@ tier: worker
 model: opencode/ling-2.6-flash-free
 expertise: .harness/expertise/generic-worker.md
 scope: <set-at-runtime>
-tools: [read, edit, bash]
+tools: [read, edit, write]
+skills: [active-listener, precise-worker]
 reports_to: generic-lead
 ---
 

@@ -4,6 +4,7 @@ tier: orchestrator
 model: opencode/nemotron-3-super-free
 expertise: .harness/expertise/orchestrator.md
 tools: [read]
+skills: [active-listener]
 ---
 
 # Orchestrator

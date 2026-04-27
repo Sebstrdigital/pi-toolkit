@@ -325,7 +325,11 @@ function bootHarness(ctx: ExtensionContext): HarnessRuntimeState | null {
 		),
 	);
 	for (const r of subagents) {
-		r.def = withSystemPromptSuffix(r.def, buildRosterPrompt(r, all, teamCfg.scopes, { dispatchMode: "text" }));
+		const roster = buildRosterPrompt(r, all, teamCfg.scopes, { dispatchMode: "text" });
+		const scopeRule = teamCfg.scopes[r.def.role]
+			? `\n\n### Scope (hard rule)\n\nYou may only read or write files matching \`${teamCfg.scopes[r.def.role]}\`. If completing the task would require touching anything outside that glob, do NOT proceed — instead reply with \`escalate ${r.def.reportsTo ?? "lead"}: <reason>\` describing the path you'd need.`
+			: "";
+		r.def = withSystemPromptSuffix(r.def, roster + scopeRule);
 	}
 
 	return {

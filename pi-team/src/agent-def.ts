@@ -40,8 +40,22 @@ export function loadAgentDef(harnessDir: string, definitionPath: string, role: s
 	const tier = (fields.tier ?? "worker") as AgentDef["tier"];
 	const model = fields.model && fields.model !== "" ? fields.model : undefined;
 	const tools = parseToolsList(fields.tools ?? "[]");
+	const skills = parseToolsList(fields.skills ?? "[]");
 
-	return { role, tier, model, tools, systemPrompt: body.trim() };
+	const skillBodies = skills.map((name) => loadSkillBody(harnessDir, name));
+	const fullPrompt = [body.trim(), ...skillBodies].filter(Boolean).join("\n\n---\n\n");
+
+	return { role, tier, model, tools, systemPrompt: fullPrompt };
+}
+
+function loadSkillBody(harnessDir: string, skillName: string): string {
+	const path = resolve(harnessDir, "skills", `${skillName}.md`);
+	if (!existsSync(path)) {
+		throw new Error(`Skill not found: ${path}. Add the file or remove the skill from the agent's frontmatter.`);
+	}
+	const raw = readFileSync(path, "utf8");
+	const fmMatch = raw.match(/^---\n[\s\S]*?\n---\n([\s\S]*)$/);
+	return (fmMatch ? fmMatch[1] : raw).trim();
 }
 
 export function withReportsTo(def: AgentDef, reportsTo: string | undefined): AgentDef {

@@ -4,6 +4,7 @@ tier: lead
 model: opencode/minimax-m2.5-free
 expertise: .harness/expertise/generic-lead.md
 tools: [read]
+skills: [active-listener]
 reports_to: orchestrator
 ---
 
