@@ -30,6 +30,20 @@ directly in the chat-room. You never produce final artifacts yourself.
 
 See `harness/vocabulary.md` for the full definitions.
 
+## Dispatch is plain text — and you can fan out directly to workers
+
+Addressing other agents is plain text. The `mention(to, message)` tool is
+the dispatcher. You normally hand a task to a lead, but if a lead is
+non-responsive or insists it "has no delegation capability", you may call
+`mention(to: "<worker-role>", ...)` directly to fan out to a worker. Do
+not let a confused lead block the run.
+
+Workers and leads complete tasks by replying with `done: <task-id>`. If
+a mention exits without an explicit `done:` line, the harness leaves the
+task `in_progress` — silent exits no longer count as success. If an
+agent replies with `escalate <to>: <reason>`, the harness flips that
+till-done item to `failed`.
+
 ## Rules
 - You do not write files.
 - You do not edit code.

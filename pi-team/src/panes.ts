@@ -1,5 +1,5 @@
 import type { Theme } from "@mariozechner/pi-coding-agent";
-import { Container, Text, type Component } from "@mariozechner/pi-tui";
+import { Container, Text, truncateToWidth, visibleWidth, type Component } from "@mariozechner/pi-tui";
 import type { AgentRuntime } from "./agent-process.ts";
 import type { TillDone } from "./till-done.ts";
 
@@ -41,6 +41,7 @@ export interface OrchestratorUsageView {
 	cacheRead: number;
 	cost: number;
 	turns: number;
+	contextTokens: number;
 }
 
 /**
@@ -55,8 +56,9 @@ export function buildTeamFooter(
 	tillDone: TillDone,
 	orchestrator: () => OrchestratorUsageView,
 	location: { cwd: string; branch: string | null },
+	activeRoles: () => ReadonlySet<string> = () => new Set(),
 ): Component {
-	return new TeamFooter(theme, subagents, tillDone, orchestrator, location);
+	return new TeamFooter(theme, subagents, tillDone, orchestrator, location, activeRoles);
 }
 
 class TeamFooter implements Component {
@@ -66,20 +68,25 @@ class TeamFooter implements Component {
 		private tillDone: TillDone,
 		private orchestrator: () => OrchestratorUsageView,
 		private location: { cwd: string; branch: string | null },
+		private activeRoles: () => ReadonlySet<string>,
 	) {}
 
 	render(width: number): string[] {
 		const th = this.theme;
 		const colW = Math.max(20, Math.floor((width - 3) / 2));
-		const left = this.renderRoster(colW);
-		const right = this.renderTillDone(colW);
+		const left = this.renderRoster(colW).map((l) => truncateToWidth(l, colW));
+		const right = this.renderTillDone(colW).map((l) => truncateToWidth(l, colW));
 		const rows = Math.max(left.length, right.length);
 		const lines: string[] = [];
 		const sep = th.fg("border", " │ ");
 		for (let i = 0; i < rows; i++) {
 			const l = pad(left[i] ?? "", colW);
 			const r = right[i] ?? "";
-			lines.push(`${l}${sep}${r}`);
+			const line = `${l}${sep}${r}`;
+			// Final safety clip — even after per-column truncation, the joined
+			// line could exceed the available width by a hair due to ANSI/visible
+			// length mismatches. pi-tui hard-fails on overflow, so clamp.
+			lines.push(visibleWidth(line) > width ? truncateToWidth(line, width) : line);
 		}
 		return lines;
 	}
@@ -117,15 +124,17 @@ class TeamFooter implements Component {
 				branchPart,
 		);
 
-		const renderRow = (role: string, tier: AgentRuntime["def"]["tier"], turns: number, input: number, cacheRead: number, output: number, cost: number, indent: number, isLast: boolean) => {
+		const active = this.activeRoles();
+		const renderRow = (role: string, tier: AgentRuntime["def"]["tier"], _turns: number, input: number, cacheRead: number, output: number, cost: number, ctx: number, indent: number, isLast: boolean) => {
 			const pad = "  ".repeat(indent);
 			const arrow = indent === 0 ? "" : (isLast ? "└─ " : "├─ ");
+			const marker = active.has(role) ? th.fg("warning", "⚡ ") : "  ";
 			const r = th.fg(colorForTier(tier), `@${role}`);
-			const t = th.fg("muted", `${turns}t`);
 			const i = th.fg("text", `${fmt(input + cacheRead)}↑`);
 			const o = th.fg("text", `${fmt(output)}↓`);
-			const c = cost > 0 ? th.fg("text", `$${cost.toFixed(4)}`) : th.fg("muted", "free");
-			return `  ${pad}${arrow}${r} ${t} ${i} ${o} ${c}`;
+			const ctxPart = ctx > 0 ? " " + th.fg("muted", `🧠 ${ctxFreePct(ctx)}% free`) : "";
+			const c = cost > 0 ? " " + th.fg("text", `$${cost.toFixed(4)}`) : "";
+			return `  ${pad}${arrow}${marker}${r} ${i} ${o}${ctxPart}${c}`;
 		};
 
 		// Build a tree by reportsTo so the roster matches the header layout.
@@ -136,13 +145,13 @@ class TeamFooter implements Component {
 			childrenOf.get(key)!.push(r);
 		}
 
-		lines.push(renderRow(orch.role, "orchestrator", orch.turns, orch.input, orch.cacheRead, orch.output, orch.cost, 0, true));
+		lines.push(renderRow(orch.role, "orchestrator", orch.turns, orch.input, orch.cacheRead, orch.output, orch.cost, orch.contextTokens, 0, true));
 
 		const walk = (parent: string | undefined, depth: number) => {
 			const kids = childrenOf.get(parent) ?? [];
 			kids.forEach((r, idx) => {
 				const isLast = idx === kids.length - 1;
-				lines.push(renderRow(r.def.role, r.def.tier, r.usage.turns, r.usage.input, r.usage.cacheRead, r.usage.output, r.usage.cost, depth, isLast));
+				lines.push(renderRow(r.def.role, r.def.tier, r.usage.turns, r.usage.input, r.usage.cacheRead, r.usage.output, r.usage.cost, r.usage.contextTokens, depth, isLast));
 				walk(r.def.role, depth + 1);
 			});
 		};
@@ -191,11 +200,38 @@ function fmt(n: number): string {
 	return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
+// Default context window for the free-tier OpenCode models we ship with.
+// TODO: source per-model from team.yaml when leads/workers have varying caps.
+const DEFAULT_CTX_WINDOW = 128_000;
+
+function ctxFreePct(used: number): number {
+	const free = Math.max(0, DEFAULT_CTX_WINDOW - used);
+	return Math.round((free / DEFAULT_CTX_WINDOW) * 100);
+}
+
 function colorForTier(tier: AgentRuntime["def"]["tier"]): "success" | "warning" | "thinkingText" {
 	if (tier === "orchestrator") return "success";
 	if (tier === "lead") return "warning";
 	return "thinkingText";
 }
+
+/** Raw ANSI used inside transcripts (rendered as tool-result text — no Theme there). */
+const ANSI = {
+	reset: "\x1b[0m",
+	orchestrator: "\x1b[32m",   // green
+	lead: "\x1b[33m",            // yellow
+	worker: "\x1b[36m",          // cyan
+	system: "\x1b[90m",          // grey
+};
+
+export function ansiForTier(tier: AgentRuntime["def"]["tier"] | "system"): string {
+	if (tier === "orchestrator") return ANSI.orchestrator;
+	if (tier === "lead") return ANSI.lead;
+	if (tier === "worker") return ANSI.worker;
+	return ANSI.system;
+}
+
+export const ANSI_RESET = ANSI.reset;
 
 /** Footer (replaces pi-ui's): only cwd + branch, centered. */
 export function buildHarnessFooter(theme: Theme, cwd: string, branch: string | null): Component {

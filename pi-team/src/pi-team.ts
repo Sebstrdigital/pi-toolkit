@@ -26,9 +26,9 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAgentDef, withReportsTo, withSystemPromptSuffix, type AgentDef } from "./agent-def.ts";
-import { makeRuntime, sendToAgent, type AgentRuntime } from "./agent-process.ts";
+import { closeAgent, makeRuntime, sendToAgent, type AgentRuntime } from "./agent-process.ts";
 import { buildRosterPrompt } from "./roster-prompt.ts";
-import { buildRosterHeader, buildTeamFooter } from "./panes.ts";
+import { ansiForTier, ANSI_RESET, buildRosterHeader, buildTeamFooter } from "./panes.ts";
 import { isAddressable, parseAgentMessage } from "./router.ts";
 import { loadTeamConfig, type TeamConfig } from "./team-config.ts";
 import { loadTeamShape, type TeamShape } from "./team-shape.ts";
@@ -49,6 +49,7 @@ interface HarnessRuntimeState {
 	                            // roster prompts know about it (no spawn ever uses it)
 	runDir: string;
 	tillDone: TillDone;
+	activeRoles: Set<string>;
 }
 
 let harness: HarnessRuntimeState | null = null;
@@ -77,9 +78,10 @@ interface OrchestratorUsage {
 	cacheWrite: number;
 	cost: number;
 	turns: number;
+	contextTokens: number;
 }
 
-const orchestratorUsage: OrchestratorUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+const orchestratorUsage: OrchestratorUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0, contextTokens: 0 };
 
 export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
@@ -114,7 +116,8 @@ export default function (pi: ExtensionAPI): void {
 						cacheRead: orchestratorUsage.cacheRead,
 						cost: orchestratorUsage.cost,
 						turns: orchestratorUsage.turns,
-					}), location);
+						contextTokens: orchestratorUsage.contextTokens,
+					}), location, () => harness?.activeRoles ?? new Set());
 				},
 				{ placement: "belowEditor" },
 			);
@@ -150,6 +153,9 @@ export default function (pi: ExtensionAPI): void {
 		orchestratorUsage.cacheWrite += m.usage.cacheWrite || 0;
 		orchestratorUsage.cost += m.usage.cost?.total || 0;
 		orchestratorUsage.turns++;
+		// Best-effort live context: this turn's input window the model just saw.
+		// (cacheRead + input ≈ tokens currently in the conversation that round-tripped.)
+		orchestratorUsage.contextTokens = (m.usage.input || 0) + (m.usage.cacheRead || 0);
 		activeTui?.requestRender();
 	});
 
@@ -182,7 +188,16 @@ export default function (pi: ExtensionAPI): void {
 			if (!harness) {
 				return { content: [{ type: "text", text: "pi-team harness is not active." }], details: null, isError: true };
 			}
-			harness.tillDone.clear();
+			if (harness.tillDone.all().length > 0) {
+				return {
+					content: [{
+						type: "text",
+						text: "plan() already registered. The plan is immutable for this user request — call mention(taskId=...) on the existing tasks. If a task is wrong, complete or fail it via mention and explain in your final reply.",
+					}],
+					details: null,
+					isError: true,
+				};
+			}
 			for (const t of params.tasks) {
 				harness.tillDone.openWithId(t.id, t.description, t.owner);
 			}
@@ -249,6 +264,7 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			const archivedAt = harness.runDir;
+			await Promise.allSettled(harness.subagents.map(closeAgent));
 			harness = null;
 			activeTui = null;
 			orchestratorUsage.input = 0;
@@ -330,7 +346,24 @@ function bootHarness(ctx: ExtensionContext): HarnessRuntimeState | null {
 			? `\n\n### Scope (hard rule)\n\nYou may only read or write files matching \`${teamCfg.scopes[r.def.role]}\`. If completing the task would require touching anything outside that glob, do NOT proceed — instead reply with \`escalate ${r.def.reportsTo ?? "lead"}: <reason>\` describing the path you'd need.`
 			: "";
 		r.def = withSystemPromptSuffix(r.def, roster + scopeRule);
+		// Dump the resolved system prompt to the run dir so we can verify what
+		// each agent actually saw on a given run.
+		writeFileSync(resolve(runDir, `prompt-${r.def.role}.md`), r.def.systemPrompt, "utf8");
 	}
+	writeFileSync(resolve(runDir, `prompt-${orchestratorWithRoster.role}.md`), orchestratorWithRoster.systemPrompt, "utf8");
+
+	// Best-effort reap of long-lived rpc subprocesses on pi-team exit so a
+	// Ctrl-C doesn't leave dangling `pi --mode rpc` children.
+	const reap = () => {
+		const h = harness;
+		if (!h) return;
+		for (const r of h.subagents) {
+			try { void closeAgent(r); } catch { /* ignore */ }
+		}
+	};
+	process.once("exit", reap);
+	process.once("SIGINT", () => { reap(); process.exit(130); });
+	process.once("SIGTERM", () => { reap(); process.exit(143); });
 
 	return {
 		cwd: ctx.cwd,
@@ -341,6 +374,7 @@ function bootHarness(ctx: ExtensionContext): HarnessRuntimeState | null {
 		all,
 		runDir,
 		tillDone: new TillDone(),
+		activeRoles: new Set<string>(),
 	};
 }
 
@@ -412,10 +446,13 @@ async function runMentionChain(
 			}
 		}
 
-		const promptForAgent = `[from @${item.from}]\n${item.body}`;
+		const fewShot = target.turns === 0 ? buildFirstTurnFewShot(target, state) : "";
+		const promptForAgent = `${fewShot}[from @${item.from}]\n${item.body}`;
 
 		emitProgress(`spawning @${item.toRole}…`);
 
+		state.activeRoles.add(item.toRole);
+		activeTui?.requestRender();
 		let stderrBuf = "";
 		const result = await sendToAgent(target, {
 			cwd: state.cwd,
@@ -429,6 +466,7 @@ async function runMentionChain(
 				stderrBuf += chunk;
 			},
 		});
+		state.activeRoles.delete(item.toRole);
 
 		transcript.push({ from: item.from, to: item.toRole, text: result.text, exitCode: result.exitCode });
 		activeTui?.requestRender();
@@ -442,7 +480,13 @@ async function runMentionChain(
 
 		// Parse the agent's reply for nested mentions and explicit done: ids.
 		const parsed = parseAgentMessage(result.text);
+		const escalated = parsed.dispatches.some((d) => d.kind === "escalate");
 		for (const dispatch of parsed.dispatches) {
+			// Lead/worker `report @orchestrator: …` and `escalate @orchestrator:
+			// …` lines surface upward as the mention's tool result text — there's
+			// no orchestrator subagent to dispatch to. Skip queueing instead of
+			// falling through to "(off-roster: unknown role @orchestrator)".
+			if (dispatch.toRole === state.orchestrator.role) continue;
 			// Nested @<role> from a lead doesn't get a new till-done item by
 			// default — the orchestrator's plan(...) call already declared the
 			// real list. Only add an implicit child item if there's no plan.
@@ -453,12 +497,14 @@ async function runMentionChain(
 			queue.push({ from: item.toRole, toRole: dispatch.toRole, body: dispatch.body, hop: item.hop + 1, tillDoneId: childId });
 		}
 		for (const id of parsed.doneIds) state.tillDone.markDone(id);
-
-		if (item.tillDoneId) state.tillDone.markDone(item.tillDoneId);
+		// If this agent escalated, flip its current till-done item to failed.
+		// Otherwise leave the item alone — only an explicit `done: <id>` flips
+		// it to done. Implicit "clean exit means done" was lying (Phase 7 A2).
+		if (item.tillDoneId && escalated) state.tillDone.markFailed(item.tillDoneId);
 		activeTui?.requestRender();
 	}
 
-	const rendered = renderTranscript(transcript);
+	const rendered = renderTranscript(transcript, state);
 	if (hardError) {
 		return {
 			content: [{ type: "text", text: `${rendered}\n\nERROR: ${hardError}` }],
@@ -471,17 +517,75 @@ async function runMentionChain(
 	function emitProgress(status: string) {
 		if (!onUpdate) return;
 		onUpdate({
-			content: [{ type: "text", text: `${renderTranscript(transcript)}\n\n…${status}` }],
+			content: [{ type: "text", text: `${renderTranscript(transcript, state)}\n\n…${status}` }],
 			details: transcript,
 		});
 	}
 }
 
-function renderTranscript(items: ChainTranscriptItem[]): string {
+function renderTranscript(items: ChainTranscriptItem[], state: HarnessRuntimeState): string {
 	return items.map((it) => {
-		const head = `── @${it.to} ◀ @${it.from} ──`;
-		return `${head}\n${it.text.trim()}`;
+		const tier = tierFor(it.to, state);
+		const color = ansiForTier(tier);
+		const badge = `${color}■ @${it.to}${ANSI_RESET} ${ansiForTier("system")}(from @${it.from})${ANSI_RESET}`;
+		const gutter = `${color}│${ANSI_RESET} `;
+		const body = it.text.trim().split("\n").map((l) => gutter + l).join("\n");
+		return `${badge}\n${body}`;
 	}).join("\n\n");
+}
+
+/**
+ * On the very first user prompt to a freshly spawned agent, inject a worked
+ * example showing the `@<role>` plain-text dispatch pattern. The system
+ * prompt already explains it, but small free-tier models (minimax m2.5,
+ * ling-2.6-flash) anchor on the user message format, so the example lands
+ * harder when it sits at the top of the user turn itself.
+ *
+ * Stress test 2026-04-27: ui-lead emitted 39 turns, zero `@frontend-worker`
+ * dispatches — instead it summarised code back at the orchestrator. PHASE-7
+ * Track A's prompt update reached the system prompt but not the model.
+ */
+function buildFirstTurnFewShot(target: AgentRuntime, state: HarnessRuntimeState): string {
+	const myRole = target.def.role;
+	const reports = target.def.reportsTo ?? "orchestrator";
+	const directReports = state.subagents.filter((r) => r.def.reportsTo === myRole).map((r) => r.def.role);
+	const exampleWorker = directReports[0];
+
+	const header = `[harness-orientation — read before acting]\n` +
+		`You are @${myRole}. The harness wraps every reply you produce, parses it for plain-text @<role> lines, and routes them to that agent's session. You have no API for delegation; the @ syntax IS the delegation.\n\n`;
+
+	if (exampleWorker) {
+		// Lead → has direct reports. Show fan-out.
+		return header +
+			`When a task arrives, do NOT solve it yourself by writing code in your reply. Decompose it and dispatch to your worker. Concretely, your reply MUST contain a line of the form\n\n` +
+			`    @${exampleWorker} <task body>\n\n` +
+			`Worked example for a hypothetical task "add a /health endpoint":\n\n` +
+			`    I read src/server.js. Plan: add an Express route GET /health returning {status:"ok"}.\n\n` +
+			`    @${exampleWorker} Add a GET /health endpoint to src/server.js after the existing tasks router. Return JSON {status:"ok"}. Reply 'done: <taskId>' once the file is written.\n\n` +
+			`    report @${reports}: dispatched health endpoint to @${exampleWorker}; awaiting completion.\n\n` +
+			`Note three things:\n` +
+			`1. The @${exampleWorker} line is plain text in your reply — that IS how you dispatch.\n` +
+			`2. You did NOT include the actual code in your reply. The worker writes the file. You read, plan, dispatch, validate.\n` +
+			`3. If you find yourself about to paste code into your reply: stop. Wrap that code as instructions to @${exampleWorker} instead.\n\n` +
+			`If you cannot complete the task (worker won't respond, scope blocked, etc.), reply with \`escalate ${reports}: <reason>\`. The harness flips the till-done item to failed.\n\n---\n\n`;
+	}
+
+	// Worker tier — no direct reports. Different framing: write files, report done.
+	return header +
+		`You are a worker — you have file-write tools. When a task arrives:\n` +
+		`1. Apply the change to the requested file(s) using your write tools.\n` +
+		`2. Reply with a short status line and \`done: <taskId>\` once the write succeeds.\n\n` +
+		`Worked example reply:\n\n` +
+		`    Wrote src/server.js: added GET /health route returning {status:"ok"}.\n\n` +
+		`    done: t3\n\n` +
+		`Do NOT paste the file contents back into your reply — only a one-line status plus \`done:\`. If you cannot apply the change (path outside scope, missing file, etc.), reply \`escalate ${reports}: <reason>\` instead. The harness flips the till-done item to failed.\n\n---\n\n`;
+}
+
+function tierFor(role: string, state: HarnessRuntimeState): "orchestrator" | "lead" | "worker" | "system" {
+	if (role === state.orchestrator.role) return "orchestrator";
+	const rt = state.all.find((r) => r.def.role === role);
+	if (!rt) return "system";
+	return rt.def.tier;
 }
 
 function detectGitBranch(cwd: string): string | null {
