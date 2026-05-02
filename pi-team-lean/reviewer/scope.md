@@ -6,6 +6,31 @@
 - Issues you can name with file:line + one-sentence fix.
 - Anti-patterns from `patterns.md`.
 - Conventions from project files (`CLAUDE.md`, `AGENTS.md`, lint configs, `.editorconfig`).
+- **Scope creep by the worker.** See "Scope creep gate" below.
+
+## Scope creep gate (HARD)
+
+The story body lists what is in scope: file paths, modules, behaviors. The worker is not authorized to touch anything else.
+
+Procedure (run this FIRST, before walking patterns.md):
+
+1. List every file path that appears in the diff (added, modified, or deleted).
+2. For each file, check whether the story body mentions it (by exact path, by directory, or by clear semantic reference — e.g. story says "add a rate limiter middleware" and the file is `src/middleware/rateLimit.js`, that counts).
+3. Any file in the diff that is NOT plausibly within the story's stated scope is scope creep. Flag it as a `must_fix` issue with category `scope_creep`. The `problem` should name the file and quote (or paraphrase) what the story actually asked for. The `suggested_fix` should be: "Revert changes to <file>; out of scope for this story."
+
+Common scope-creep patterns to catch:
+
+- Worker modified an unrelated test file's assertions to make a pre-existing failure pass. (Does NOT count as fixing the story; counts as silently rewriting tests.)
+- Worker "while I was here" refactored a file the story did not mention.
+- Worker bumped a dependency or edited config (`package.json`, `tsconfig.json`, `.eslintrc`, etc.) without the story asking for it.
+
+Exceptions (NOT scope creep):
+
+- A file the story explicitly authorizes (`update src/x.js`, `add tests in src/tests/x.test.js`).
+- A file whose change is mechanically required by the story (e.g. registering a new route in `routes/index.js` when the story said "add a route handler").
+- The worker's own new files within the path the story specified.
+
+If in doubt, flag it. The worker can argue scope in the next iteration.
 
 ## Out of scope
 
