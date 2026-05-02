@@ -2,7 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { runPi } from "./pi.js";
-import { qaAuthorPrompt, workerPrompt } from "./prompts.js";
+import { qaScriptPrompt, workerPrompt } from "./prompts.js";
 import {
   ensureCleanTree,
   cutBranch,
@@ -14,6 +14,8 @@ import {
   diffBetween,
 } from "./git.js";
 import { runPaths, writeArtifact, writeJsonArtifact, ARTIFACTS } from "./runs.js";
+import { scenariosForStory } from "./features.js";
+import { judgeScenarios } from "./scenarios.js";
 import type { Sprint, SprintState, StoryState, Story } from "./types.js";
 
 const log = (msg: string): void => console.log(`[pi-team-lean] ${msg}`);
@@ -58,13 +60,25 @@ const runTestCommand = (cmd: string, cwd: string): { ok: boolean; output: string
 const main = async (): Promise<void> => {
   const sprintPath = process.argv[2];
   if (!sprintPath) {
-    console.error("Usage: pi-team-lean <sprint.json> [--cwd <repo>]");
+    console.error("Usage: pi-team-lean <sprint.json> [--cwd <repo>] [--story <id>]");
     process.exit(2);
   }
   const cwdFlagIdx = process.argv.indexOf("--cwd");
   const repoCwd = cwdFlagIdx > 0 ? resolve(process.argv[cwdFlagIdx + 1]!) : process.cwd();
+  const storyFlagIdx = process.argv.indexOf("--story");
+  const onlyStory = storyFlagIdx > 0 ? process.argv[storyFlagIdx + 1] : undefined;
 
   const sprint: Sprint = JSON.parse(readFileSync(sprintPath, "utf8"));
+  if (onlyStory) {
+    const filtered = sprint.stories.filter((s) => s.id === onlyStory);
+    if (filtered.length === 0) {
+      console.error(`[pi-team-lean] --story ${onlyStory} not found in sprint`);
+      process.exit(2);
+    }
+    filtered[0]!.depends_on = [];
+    sprint.stories = filtered;
+    console.log(`[pi-team-lean] Filtered to single story: ${onlyStory} (dependencies cleared)`);
+  }
   const baseBranch = sprint.base_branch ?? "main";
   const runId = sprint.staging_branch ? sprint.staging_branch.split("/").pop()! : `${Date.now()}`;
   const stagingBranch = sprint.staging_branch ?? `pi-team-lean/${runId}/staging`;
@@ -122,28 +136,9 @@ const main = async (): Promise<void> => {
     log(`---- ${story.id}: ${story.title} ----`);
 
     paths.storyDir(story.id);
-
-    // 1. QA author bash assertions (one shot)
     const acceptPath = join(acceptDir, `${story.id}.sh`);
-    if (!existsSync(acceptPath)) {
-      log(`qa-author: drafting acceptance.sh`);
-      const qa = await runPi(qaAuthorPrompt(story), repoCwd, sprint.qa_model);
-      if (qa.exitCode !== 0 || !qa.stdout.trim()) {
-        ss.status = "failed";
-        ss.failure_reason = `qa-author failed (exit ${qa.exitCode})\n${qa.stderr.slice(0, 500)}`;
-        log(`FAIL  ${story.id}: ${ss.failure_reason}`);
-        ss.ended_at = new Date().toISOString();
-        persist();
-        continue;
-      }
-      writeFileSync(acceptPath, qa.stdout);
-      chmodSync(acceptPath, 0o755);
-    } else {
-      log(`qa-author: reusing existing acceptance.sh`);
-    }
-    writeArtifact(paths.artifact(story.id, ARTIFACTS.qaScript), readFileSync(acceptPath, "utf8"));
 
-    // 2. Cut feature branch from staging, run worker
+    // 1. Cut feature branch from staging, run worker (worker does NOT see acceptance criteria)
     const featureBranch = `pi-team-lean/${runId}/story-${story.id}`;
     cutBranch(featureBranch, stagingBranch, repoCwd);
     ss.branch = featureBranch;
@@ -158,7 +153,6 @@ const main = async (): Promise<void> => {
         if (line.trim()) console.log(`  pi> ${line}`);
       },
     );
-
     writeArtifact(paths.artifact(story.id, ARTIFACTS.workerStdout), w.stdout);
     writeArtifact(paths.artifact(story.id, ARTIFACTS.workerStderr), w.stderr);
 
@@ -172,7 +166,7 @@ const main = async (): Promise<void> => {
       continue;
     }
 
-    // 3. Verify worker actually committed
+    // 2. Verify worker actually committed
     const newCommits = commitsOnBranch(featureBranch, stagingBranch, repoCwd);
     if (newCommits.length === 0) {
       ss.status = "failed";
@@ -184,10 +178,11 @@ const main = async (): Promise<void> => {
       continue;
     }
     ss.commits = newCommits;
-    writeArtifact(paths.artifact(story.id, ARTIFACTS.workerDiff), diffBetween(stagingBranch, featureBranch, repoCwd));
+    const workerDiff = diffBetween(stagingBranch, featureBranch, repoCwd);
+    writeArtifact(paths.artifact(story.id, ARTIFACTS.workerDiff), workerDiff);
     persist();
 
-    // 4. Run test command
+    // 3. Run test command
     log(`verify: ${story.test_command ?? testCommand}`);
     const t = runTestCommand(story.test_command ?? testCommand, repoCwd);
     writeArtifact(paths.artifact(story.id, ARTIFACTS.testCommandOutput), t.output);
@@ -201,7 +196,22 @@ const main = async (): Promise<void> => {
       continue;
     }
 
-    // 5. Run acceptance.sh
+    // 4. Generate qa-script with diff visibility, then run it
+    log(`qa-script: drafting (diff-aware)`);
+    const qa = await runPi(qaScriptPrompt(story, workerDiff), repoCwd, sprint.qa_model);
+    if (qa.exitCode !== 0 || !qa.stdout.trim()) {
+      ss.status = "failed";
+      ss.failure_reason = `qa-script author failed (exit ${qa.exitCode})\n${qa.stderr.slice(0, 500)}`;
+      checkout(stagingBranch, repoCwd);
+      log(`FAIL  ${story.id}: ${ss.failure_reason}`);
+      ss.ended_at = new Date().toISOString();
+      persist();
+      continue;
+    }
+    writeFileSync(acceptPath, qa.stdout);
+    chmodSync(acceptPath, 0o755);
+    writeArtifact(paths.artifact(story.id, ARTIFACTS.qaScript), qa.stdout);
+
     log(`accept: ${acceptPath}`);
     const a = runTestCommand(`bash ${acceptPath}`, repoCwd);
     writeArtifact(paths.artifact(story.id, ARTIFACTS.qaScriptOutput), a.output);
@@ -213,6 +223,27 @@ const main = async (): Promise<void> => {
       ss.ended_at = new Date().toISOString();
       persist();
       continue;
+    }
+
+    // 5. Scenario-judge (lenient: warn but don't block)
+    const scenarios = scenariosForStory(sprint.feature_path, story.id, story.feature_story_id);
+    if (scenarios.length > 0) {
+      log(`judge: ${scenarios.length} scenarios via 3-judge majority`);
+      const diff = diffBetween(stagingBranch, featureBranch, repoCwd);
+      const judgement = await judgeScenarios(story, scenarios, diff, t.output, repoCwd, sprint.judge_model);
+      writeJsonArtifact(paths.artifact(story.id, ARTIFACTS.scenarioJudgement), judgement);
+      const failed = judgement.consensus.filter((c) => c.verdict === "fail");
+      const inconclusive = judgement.consensus.filter((c) => c.verdict === "inconclusive");
+      if (failed.length > 0) {
+        log(`WARN  ${story.id}: scenario-judge fail (${failed.length}/${scenarios.length}) — proceeding (lenient)`);
+        for (const f of failed) log(`        ${f.id}: ${f.gaps[0] ?? "no gap reported"}`);
+      } else if (inconclusive.length > 0) {
+        log(`WARN  ${story.id}: scenario-judge inconclusive (${inconclusive.length}/${scenarios.length})`);
+      } else {
+        log(`PASS  ${story.id}: scenarios pass`);
+      }
+    } else if (sprint.feature_path) {
+      log(`judge: no scenarios found for ${story.id} in ${sprint.feature_path}`);
     }
 
     // 6. Merge feature → staging

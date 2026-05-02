@@ -1,6 +1,6 @@
 import type { Story } from "./types.js";
 
-export const qaAuthorPrompt = (story: Story): string => `You are authoring acceptance checks for a user story. Output a single bash script that exits 0 only when the story is correctly implemented.
+export const qaScriptPrompt = (story: Story, diff: string): string => `You are authoring acceptance checks for a user story that has just been implemented. Output a single bash script that exits 0 only when the implementation correctly satisfies the story.
 
 # Story
 
@@ -9,16 +9,38 @@ export const qaAuthorPrompt = (story: Story): string => `You are authoring accep
 **Body:**
 ${story.body}
 
+# Worker diff (what was actually implemented)
+
+\`\`\`diff
+${diff.slice(0, 60000)}
+\`\`\`
+
 # Output rules
 
 1. Output ONLY the bash script. No prose, no markdown fences, no explanation.
 2. Start with \`#!/usr/bin/env bash\` and \`set -u\`.
-3. Use environment variable \`BASE_URL\` (default http://localhost:3000) if HTTP is needed.
-4. Each assertion must be independent and idempotent.
-5. Print \`PASS <name>\` or \`FAIL <name>\` for each check.
-6. Track failures in a counter and \`exit $FAIL\` at the end.
-7. The script will run AFTER the implementation is committed and AFTER the project's test_command passes. Assume the application code exists.
-8. If the story requires a running server, the harness has started it on $BASE_URL before invoking your script. Do not start servers yourself.
+3. Each assertion must be independent and idempotent.
+4. Print \`PASS <name>\` or \`FAIL <name>\` for each check.
+5. Track failures in a counter and \`exit $FAIL\` at the end.
+6. The project's test_command has already passed before this script runs. Assume the application builds and tests pass.
+
+# Hard rules — what NOT to do
+
+- DO NOT assert literal API call strings (e.g. "activate(ignoringOtherApps: true)" — defensible API choices may differ).
+- DO NOT assert literal test method names or substrings of test names ("ordering", "idempotent", etc.) — name them what you want; behavior is judged elsewhere.
+- DO NOT parse function bodies and assert call ordering or that one identifier appears before another — refactors break this.
+- DO NOT require specific error messages or log strings unless the story body pins them.
+- DO NOT regex over identifier names — names change.
+
+# Hard rules — what TO do
+
+Prefer (in priority order):
+1. **Behavioral**: invoke the code or a smoke test, assert observable output.
+2. **Compile-time**: a tiny program that imports and instantiates the new types — fails build if signatures wrong.
+3. **Symbol presence via parser**: "type X is declared" yes; "the literal string Y appears" no.
+4. **File existence**: fine.
+
+The diff above shows what the worker actually built. Bind your assertions to the symbols and files in the diff, not to symbols you guess might exist.
 
 Begin now.`;
 

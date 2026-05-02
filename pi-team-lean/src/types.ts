@@ -4,6 +4,7 @@ export interface Story {
   body: string;
   depends_on?: string[];
   test_command?: string;
+  feature_story_id?: string;
 }
 
 export interface Sprint {
@@ -12,6 +13,8 @@ export interface Sprint {
   test_command?: string;
   worker_model?: string;
   qa_model?: string;
+  judge_model?: string;
+  feature_path?: string;
   stories: Story[];
 }
 
