@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pi-team-lean — flow</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --fg: #1c1c1c;
+    --muted: #6b6b6b;
+    --line: #d4d4d4;
+    --det: #1c4532;
+    --det-bg: #d8efe1;
+    --llm: #6b21a8;
+    --llm-bg: #ece1f5;
+    --io: #1e3a8a;
+    --io-bg: #dde6f5;
+    --bad: #7f1d1d;
+    --bad-bg: #f4dada;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    padding: 40px 48px 80px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 15px; font-weight: 600; margin: 40px 0 16px; letter-spacing: -0.005em; }
+  .sub { color: var(--muted); margin-bottom: 32px; font-size: 13px; }
+  .legend {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    background: #fff;
+    margin-bottom: 32px;
+    font-size: 12px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 14px; height: 14px; border: 1px solid; flex-shrink: 0; }
+  .swatch.det { background: var(--det-bg); border-color: var(--det); }
+  .swatch.llm { background: var(--llm-bg); border-color: var(--llm); }
+  .swatch.io { background: var(--io-bg); border-color: var(--io); }
+  .swatch.bad { background: var(--bad-bg); border-color: var(--bad); }
+
+  .flow {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border-left: 2px solid var(--line);
+    padding-left: 24px;
+    margin-left: 16px;
+    position: relative;
+  }
+  .step {
+    display: grid;
+    grid-template-columns: 32px 110px 1fr;
+    gap: 14px;
+    align-items: start;
+    padding: 12px 14px;
+    border: 1px solid;
+    background: #fff;
+    position: relative;
+  }
+  .step::before {
+    content: "";
+    position: absolute;
+    left: -25px;
+    top: 24px;
+    width: 23px;
+    height: 1px;
+    background: var(--line);
+  }
+  .step.det { border-color: var(--det); background: var(--det-bg); }
+  .step.llm { border-color: var(--llm); background: var(--llm-bg); }
+  .step.io  { border-color: var(--io);  background: var(--io-bg);  }
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: var(--muted);
+    font-size: 12px;
+    padding-top: 1px;
+  }
+  .tag {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 6px;
+    align-self: flex-start;
+    border: 1px solid;
+    background: #fff;
+  }
+  .tag.det { color: var(--det); border-color: var(--det); }
+  .tag.llm { color: var(--llm); border-color: var(--llm); }
+  .tag.io  { color: var(--io);  border-color: var(--io);  }
+  .body { min-width: 0; }
+  .what { font-weight: 600; margin-bottom: 4px; }
+  .where { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .why { font-size: 12px; color: #333; margin-top: 6px; }
+
+  .branch {
+    margin-left: 32px;
+    padding: 10px 14px;
+    border: 1px dashed var(--line);
+    background: #fff;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .branch.bad { border-color: var(--bad); background: var(--bad-bg); color: #5a1212; }
+  .branch.bad strong { color: #5a1212; }
+  .branch strong { color: var(--fg); }
+
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .card {
+    border: 1px solid var(--line);
+    background: #fff;
+    padding: 14px 16px;
+  }
+  .card h3 {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin-bottom: 4px; }
+  .card .extra { font-size: 12px; color: var(--muted); }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  code {
+    background: #f0efea;
+    padding: 1px 5px;
+    border: 1px solid var(--line);
+  }
+  pre {
+    background: #f0efea;
+    border: 1px solid var(--line);
+    padding: 10px 12px;
+    overflow-x: auto;
+    margin: 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+  td.kind { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
+  td.kind.det { color: var(--det); }
+  td.kind.llm { color: var(--llm); }
+  td.kind.io  { color: var(--io); }
+  .footnote { color: var(--muted); font-size: 12px; margin-top: 24px; }
+</style>
+</head>
+<body>
+
+<h1>pi-team-lean — flow</h1>
+<div class="sub">Per-story pipeline. Two LLM calls; everything else is git, bash, exit codes.</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="swatch det"></span> deterministic — code, git, bash, exit codes</div>
+  <div class="legend-item"><span class="swatch llm"></span> LLM — pi subprocess, prompt-driven</div>
+  <div class="legend-item"><span class="swatch io"></span> I/O — read/write to disk or repo state</div>
+</div>
+
+<h2>Bootstrap (once per pi-team-lean run)</h2>
+<div class="flow">
+  <div class="step io">
+    <div class="num">B1</div>
+    <span class="tag io">I/O</span>
+    <div class="body">
+      <div class="what">Parse <code>sprint.json</code> from arg</div>
+      <div class="where">src/index.ts → readFileSync(sprintPath) → JSON.parse → Sprint</div>
+      <div class="why">No transformation. Sprint is TAKT-compatible subset: <code>{ base_branch?, staging_branch?, test_command?, worker_model?, qa_model?, stories[] }</code>.</div>
+    </div>
+  </div>
+  <div class="step det">
+    <div class="num">B2</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Verify clean working tree</div>
+      <div class="where">src/git.ts → ensureCleanTree() → <code>git status --porcelain</code></div>
+      <div class="why">Refuse to start if anything is uncommitted. No exceptions.</div>
+    </div>
+  </div>
+  <div class="step det">
+    <div class="num">B3</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Cut staging branch from base</div>
+      <div class="where">src/git.ts → cutBranch(staging, base) → <code>git checkout base; git checkout -b staging</code></div>
+      <div class="why">Defaults: base = <code>main</code>, staging = <code>pi-team-lean/staging-&lt;timestamp&gt;</code>. If staging already exists, resume on it (no recut).</div>
+    </div>
+  </div>
+  <div class="step io">
+    <div class="num">B4</div>
+    <span class="tag io">I/O</span>
+    <div class="body">
+      <div class="what">Initialize <code>.pi-team-lean/sprint-state.json</code></div>
+      <div class="where">src/index.ts → mkdirSync acceptance/ + writeFileSync state</div>
+      <div class="why">All stories seeded as <code>pending</code>. Persisted after every state change so TAKT retro can read partial runs.</div>
+    </div>
+  </div>
+  <div class="step det">
+    <div class="num">B5</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Topological sort stories by <code>depends_on</code></div>
+      <div class="where">src/index.ts → topoSort()</div>
+      <div class="why">Pure function. Detects cycles, throws on unknown dependency ids. No LLM input on ordering.</div>
+    </div>
+  </div>
+</div>
+
+<h2>Per-story loop (sequential, one at a time)</h2>
+<div class="flow">
+  <div class="step det">
+    <div class="num">S0</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Check unmet dependencies</div>
+      <div class="where">src/index.ts → blockers = depends_on.filter(d ≠ "merged")</div>
+      <div class="why">If any blocker is not <code>merged</code>, mark story <code>skipped</code> with reason and continue to next story.</div>
+    </div>
+  </div>
+  <div class="branch"><strong>If skipped →</strong> next story (no LLM, no branch ops).</div>
+
+  <div class="step llm">
+    <div class="num">S1</div>
+    <span class="tag llm">LLM</span>
+    <div class="body">
+      <div class="what">qa-author drafts <code>acceptance/&lt;story-id&gt;.sh</code></div>
+      <div class="where">src/pi.ts → spawn pi -p --no-session --mode text [--model qa_model]<br>prompt: src/prompts.ts → qaAuthorPrompt(story)</div>
+      <div class="why">Once per story (cached on disk; reused on retry). Output is raw bash — script must <code>exit 0</code> only when story is correctly implemented. <strong>Build-side never sees this script.</strong></div>
+    </div>
+  </div>
+  <div class="branch bad"><strong>If qa-author fails or empty →</strong> story marked <code>failed</code>, no branch cut.</div>
+
+  <div class="step det">
+    <div class="num">S2</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Cut feature branch from staging</div>
+      <div class="where">src/git.ts → cutBranch(<code>pi-team-lean/&lt;staging&gt;/story-&lt;id&gt;</code>, staging)</div>
+      <div class="why">Per-story isolation. Worker only ever sees its own branch.</div>
+    </div>
+  </div>
+
+  <div class="step llm">
+    <div class="num">S3</div>
+    <span class="tag llm">LLM</span>
+    <div class="body">
+      <div class="what">worker implements + commits</div>
+      <div class="where">src/pi.ts → spawn pi -p --no-session --mode text [--model worker_model]<br>prompt: src/prompts.ts → workerPrompt(story, scope, test_command)</div>
+      <div class="why">Worker is told to read project conventions (<code>CLAUDE.md</code>, <code>.pi/AGENTS.md</code>), implement, run tests itself for tight feedback, then <code>git add -A && git commit</code>. Worker has no merge/branch authority.</div>
+    </div>
+  </div>
+  <div class="branch bad"><strong>If worker exits non-zero →</strong> back to staging, story <code>failed</code>.</div>
+
+  <div class="step det">
+    <div class="num">S4</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Verify worker actually committed</div>
+      <div class="where">src/git.ts → commitsOnBranch(feature, staging) → <code>git log staging..feature --format=%H</code></div>
+      <div class="why">Empty list = worker exited successfully but produced no commits. Treat as failure — never silently merge a no-op branch.</div>
+    </div>
+  </div>
+  <div class="branch bad"><strong>If no commits →</strong> back to staging, story <code>failed</code>.</div>
+
+  <div class="step det">
+    <div class="num">S5</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Run <code>test_command</code></div>
+      <div class="where">src/index.ts → runTestCommand(test_command, repoCwd)</div>
+      <div class="why">Defaults to <code>npm test</code>; per-story override via <code>story.test_command</code>. Pass = exit 0. Captures stdout+stderr for failure trail.</div>
+    </div>
+  </div>
+  <div class="branch bad"><strong>If test_command fails →</strong> back to staging, story <code>failed</code> with last 1.5KB of output.</div>
+
+  <div class="step det">
+    <div class="num">S6</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Run <code>acceptance/&lt;id&gt;.sh</code></div>
+      <div class="where">src/index.ts → runTestCommand(<code>bash &lt;script&gt;</code>, repoCwd)</div>
+      <div class="why">QA gate. Bash assertions written by S1 are evaluated against the implemented branch. Pass = exit 0. The implementation cannot read or game these assertions because the worker prompt never included them.</div>
+    </div>
+  </div>
+  <div class="branch bad"><strong>If acceptance fails →</strong> back to staging, story <code>failed</code>.</div>
+
+  <div class="step det">
+    <div class="num">S7</div>
+    <span class="tag det">DET</span>
+    <div class="body">
+      <div class="what">Merge feature → staging (<code>--no-ff</code>)</div>
+      <div class="where">src/git.ts → mergeNoFf(feature, staging, "merge: &lt;id&gt; &lt;title&gt;")</div>
+      <div class="why">No fast-forward keeps the per-story branch boundary visible in history. Story state → <code>merged</code>.</div>
+    </div>
+  </div>
+  <div class="branch"><strong>On merge →</strong> next story.</div>
+</div>
+
+<h2>Teardown (after last story)</h2>
+<div class="flow">
+  <div class="step io">
+    <div class="num">T1</div>
+    <span class="tag io">I/O</span>
+    <div class="body">
+      <div class="what">Final state write + checkout staging</div>
+      <div class="where">src/index.ts → writeFileSync(state) + checkout(staging)</div>
+      <div class="why">Print summary line per story. Staging branch left intact for human review or PR. <strong>main is never touched by this harness.</strong></div>
+    </div>
+  </div>
+</div>
+
+<h2>What was bootstrapped</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>Built from scratch</h3>
+    <ul>
+      <li><code>pi-team-lean/</code> — new package</li>
+      <li><code>src/index.ts</code> — main loop, state machine, sprint runner</li>
+      <li><code>src/git.ts</code> — thin git wrapper (44 LOC)</li>
+      <li><code>src/pi.ts</code> — pi subprocess wrapper (46 LOC)</li>
+      <li><code>src/prompts.ts</code> — qa-author + worker prompt templates</li>
+      <li><code>src/types.ts</code> — Sprint / Story / SprintState shapes</li>
+      <li><code>bin/pi-team-lean.mjs</code> — CLI entry</li>
+      <li><code>package.json</code>, <code>tsconfig.json</code>, <code>README.md</code></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Defaults / extensions used</h3>
+    <ul>
+      <li><strong>No pi extensions.</strong> Spawns the <code>pi</code> CLI as a subprocess only.</li>
+      <li>Standard Node 22 builtins: <code>child_process</code>, <code>fs</code>, <code>path</code>.</li>
+      <li>Devdeps: <code>typescript</code>, <code>@types/node</code>. No runtime deps.</li>
+      <li>Reuses your existing <code>pi</code> install + auth (host subscription).</li>
+    </ul>
+    <div class="extra" style="margin-top:10px;">No skills, no agents, no MCP, no extension API touched. The harness is a plain Node CLI.</div>
+  </div>
+</div>
+
+<h2>Step taxonomy</h2>
+<table>
+  <thead>
+    <tr><th style="width: 70px;">Step</th><th style="width: 90px;">Kind</th><th>What</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>B1</td><td class="kind io">I/O</td><td>Read sprint.json</td></tr>
+    <tr><td>B2</td><td class="kind det">DET</td><td>Ensure clean working tree</td></tr>
+    <tr><td>B3</td><td class="kind det">DET</td><td>Cut staging branch from base</td></tr>
+    <tr><td>B4</td><td class="kind io">I/O</td><td>Init sprint-state.json</td></tr>
+    <tr><td>B5</td><td class="kind det">DET</td><td>Topo sort stories</td></tr>
+    <tr><td>S0</td><td class="kind det">DET</td><td>Check dependencies, mark blocked stories skipped</td></tr>
+    <tr><td>S1</td><td class="kind llm">LLM</td><td>qa-author writes bash assertions (1 call)</td></tr>
+    <tr><td>S2</td><td class="kind det">DET</td><td>Cut feature branch</td></tr>
+    <tr><td>S3</td><td class="kind llm">LLM</td><td>worker implements + commits (1 call)</td></tr>
+    <tr><td>S4</td><td class="kind det">DET</td><td>Verify commits exist on feature branch</td></tr>
+    <tr><td>S5</td><td class="kind det">DET</td><td>Run test_command</td></tr>
+    <tr><td>S6</td><td class="kind det">DET</td><td>Run acceptance.sh (QA gate)</td></tr>
+    <tr><td>S7</td><td class="kind det">DET</td><td>Merge feature → staging</td></tr>
+    <tr><td>T1</td><td class="kind io">I/O</td><td>Final state + checkout staging</td></tr>
+  </tbody>
+</table>
+
+<h2>Counts</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>Per story</h3>
+    <ul>
+      <li>LLM calls: <strong>2</strong> (qa-author once, worker once)</li>
+      <li>Deterministic steps: <strong>6</strong> (S0, S2, S4, S5, S6, S7)</li>
+      <li>I/O writes to state: <strong>≥4</strong> (after every status change)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Per sprint</h3>
+    <ul>
+      <li>Bootstrap: 5 steps (3 DET + 2 I/O)</li>
+      <li>Teardown: 1 step (I/O)</li>
+      <li>LLM calls total: <strong>2 × N stories</strong></li>
+    </ul>
+  </div>
+</div>
+
+<div class="footnote">
+  Source: <code>pi-team-lean/src/</code> at commit 1e0d54b. Total 387 LOC across 5 files. No runtime dependencies.
+</div>
+
+</body>
+</html>
