@@ -15,3 +15,7 @@ pi-ui/package-lock.json
 
 # Phase 4 spike artifacts
 pi-chains/spike-runs/
+
+# pi-team-lean build output and per-repo state (state lives in target repos, not here)
+pi-team-lean/dist/
+pi-team-lean/node_modules/
