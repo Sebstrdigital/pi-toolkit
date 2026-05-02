@@ -5,6 +5,7 @@ export interface Story {
   depends_on?: string[];
   test_command?: string;
   feature_story_id?: string;
+  worker_timeout_min?: number;
 }
 
 export interface Sprint {
@@ -18,6 +19,7 @@ export interface Sprint {
   feature_path?: string;
   enable_reviewer?: boolean;
   max_review_iterations?: number;
+  worker_timeout_min?: number;
   stories: Story[];
 }
 

@@ -17,7 +17,10 @@ import { runPaths, writeArtifact, writeJsonArtifact, ARTIFACTS } from "./runs.js
 import { scenariosForStory } from "./features.js";
 import { judgeScenarios } from "./scenarios.js";
 import { runReview, reviewerFeedbackForWorker, type ReviewResult } from "./reviewer.js";
+import { cliPreflight } from "./preflight.js";
 import type { Sprint, SprintState, StoryState, Story } from "./types.js";
+
+const DEFAULT_WORKER_TIMEOUT_MIN = 15;
 
 const log = (msg: string): void => console.log(`[pi-team-lean] ${msg}`);
 
@@ -59,9 +62,13 @@ const runTestCommand = (cmd: string, cwd: string): { ok: boolean; output: string
 };
 
 const main = async (): Promise<void> => {
+  if (process.argv[2] === "check") {
+    process.exit(cliPreflight(process.argv.slice(3)));
+  }
   const sprintPath = process.argv[2];
   if (!sprintPath) {
     console.error("Usage: pi-team-lean <sprint.json> [--cwd <repo>]");
+    console.error("       pi-team-lean check <repo> [--sprint <path>]");
     process.exit(2);
   }
   const cwdFlagIdx = process.argv.indexOf("--cwd");
@@ -152,7 +159,9 @@ const main = async (): Promise<void> => {
 
     for (let iter = 1; iter <= maxIter; iter++) {
       const feedback = lastReview ? reviewerFeedbackForWorker(lastReview) : "";
-      log(`worker: implementing on ${featureBranch} (iter ${iter}/${maxIter}${feedback ? ", with review feedback" : ""})`);
+      const timeoutMin = story.worker_timeout_min ?? sprint.worker_timeout_min ?? DEFAULT_WORKER_TIMEOUT_MIN;
+      const timeoutMs = timeoutMin * 60 * 1000;
+      log(`worker: implementing on ${featureBranch} (iter ${iter}/${maxIter}${feedback ? ", with review feedback" : ""}, timeout ${timeoutMin}m)`);
       const w = await runPi(
         workerPrompt(story, "", story.test_command ?? testCommand, feedback),
         repoCwd,
@@ -160,6 +169,7 @@ const main = async (): Promise<void> => {
         (line) => {
           if (line.trim()) console.log(`  pi> ${line}`);
         },
+        { timeoutMs },
       );
       writeArtifact(paths.artifact(story.id, `worker.iter${iter}.stdout.log`), w.stdout);
       writeArtifact(paths.artifact(story.id, `worker.iter${iter}.stderr.log`), w.stderr);
@@ -168,7 +178,8 @@ const main = async (): Promise<void> => {
 
       if (w.exitCode !== 0) {
         ss.status = "failed";
-        ss.failure_reason = `worker exit ${w.exitCode} (iter ${iter})\n${w.stderr.slice(0, 500)}`;
+        const reason = w.timedOut ? `worker timed out after ${timeoutMin}m (iter ${iter})` : `worker exit ${w.exitCode} (iter ${iter})`;
+        ss.failure_reason = `${reason}\n${w.stderr.slice(0, 500)}`;
         workerFailed = true;
         break;
       }
