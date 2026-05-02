@@ -171,6 +171,53 @@
   td.kind.llm { color: var(--llm); }
   td.kind.io  { color: var(--io); }
   .footnote { color: var(--muted); font-size: 12px; margin-top: 24px; }
+
+  /* v2 muted variant */
+  .v2 .step { opacity: 0.55; }
+  .v2 .step.added { opacity: 1; }
+  .v2 .step.added.det { border-color: var(--det); background: var(--det-bg); }
+  .v2 .step.added.llm { border-color: var(--llm); background: var(--llm-bg); }
+  .v2 .step.added.io  { border-color: var(--io);  background: var(--io-bg); }
+  .v2 .step.added::after {
+    content: "v2";
+    position: absolute;
+    top: -1px;
+    right: -1px;
+    background: var(--fg);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 2px 6px;
+  }
+  .v2 .branch { opacity: 0.55; }
+  .v2 .branch.added { opacity: 1; border-style: solid; }
+  .roadmap {
+    border: 1px solid var(--line);
+    background: #fff;
+    padding: 0;
+    margin-bottom: 16px;
+  }
+  .roadmap-row {
+    display: grid;
+    grid-template-columns: 60px 160px 1fr 90px;
+    gap: 16px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+    align-items: start;
+  }
+  .roadmap-row:last-child { border-bottom: none; }
+  .roadmap-row .rid { font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .roadmap-row .rname { font-weight: 600; }
+  .roadmap-row .rcost {
+    font-size: 11px;
+    text-align: right;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .roadmap-row .rdesc { color: #333; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -406,8 +453,180 @@
   </div>
 </div>
 
+<h2>v1 → v2 roadmap (only after MVP earns it)</h2>
+<div class="sub" style="margin-bottom:16px;">Each item triggers from a real failure or limitation hit during MVP runs — not from speculation. Order is suggested by likely first-pain.</div>
+<div class="roadmap">
+  <div class="roadmap-row">
+    <div class="rid">N1</div>
+    <div class="rname">Worker retry on test fail</div>
+    <div class="rdesc">Today: test fails → story marked failed and abandoned. Add a single retry that re-runs worker with the failure tail as feedback. Bounded (max 1 retry, hard cap). Triggers when MVP shows workers usually pass on a second pass.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N2</div>
+    <div class="rname">Acceptance authoring review</div>
+    <div class="rdesc">Today: qa-author output is trusted blindly. Add an optional one-line check (script syntax-validates with <code>bash -n</code>) and a prompt-for-confirmation flag for prose-input sprints. No grading — just "does it parse + does the user OK it?".</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N3</div>
+    <div class="rname">Server-up hook</div>
+    <div class="rdesc">Today: acceptance scripts assume <code>$BASE_URL</code> reachable; harness doesn't actually start the server. Add <code>sprint.server_command</code> + readiness probe (<code>curl --retry-connrefused</code>) before S6, kill on teardown. Triggers first time an HTTP-acceptance story is run.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N4</div>
+    <div class="rname">Resume from sprint-state</div>
+    <div class="rdesc">Today: re-running re-cuts staging if name differs, otherwise picks it up; story state isn't read on restart. Add <code>--resume</code> that skips already-merged stories and re-attempts failed/in-progress ones. State file is already shaped for this.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N5</div>
+    <div class="rname">TAKT round-trip</div>
+    <div class="rdesc">Sprint format already TAKT-subset on input. Add explicit writer for TAKT's expected <code>sprint-state.json</code> shape (or whatever the consumer reads), so retro is automatic. Triggers when first TAKT-driven sprint completes.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N6</div>
+    <div class="rname">Parallel independent stories</div>
+    <div class="rdesc">When <code>depends_on</code> graph allows, run multiple stories concurrently in separate <code>git worktree</code>s. Merge order still serialized by topological position to keep staging deterministic. Triggers when sequential runtime is the bottleneck — not before.</div>
+    <div class="rcost">Medium</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N7</div>
+    <div class="rname">Container isolation</div>
+    <div class="rdesc">Wrap pi worker in podman/docker so each story gets fresh filesystem + dep state. Fork sandcastle's pi flow (or write our own ~100 LOC). Pi auth via mounted <code>~/.pi/</code>. Triggers when host pollution causes a real bug.</div>
+    <div class="rcost">Large</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N8</div>
+    <div class="rname">Decomposing team-lead tier</div>
+    <div class="rdesc">Re-introduce a single LLM step between <em>story → tasks</em> for stories too large for one worker pass. Output JSON list, harness validates. <strong>Only if</strong> MVP shows worker pi can't handle whole-story tasks. Otherwise stays out.</div>
+    <div class="rcost">Medium</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N9</div>
+    <div class="rname">Multi-team / scope routing</div>
+    <div class="rdesc">Today: <code>owner_team</code> field is unused. When two teams (frontend/backend) become real — different model preferences, different worker prompts, different scope globs — wire it up. Until then, one team is enough.</div>
+    <div class="rcost">Medium</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N10</div>
+    <div class="rname">Cost + token telemetry</div>
+    <div class="rdesc">Pi's JSON stream emits per-call usage. Aggregate into <code>sprint-state.json</code>. Cheap to add. Triggers when first sprint costs surprise.</div>
+    <div class="rcost">Small</div>
+  </div>
+</div>
+
+<h2>v2 flow — same skeleton, additions highlighted</h2>
+<div class="sub" style="margin-bottom:16px;">Faded steps are unchanged from v1. Crisp steps with the <em>v2</em> badge are new or substantially modified.</div>
+
+<div class="v2">
+<h3 style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:16px 0 12px;">Bootstrap</h3>
+<div class="flow">
+  <div class="step io"><div class="num">B1</div><span class="tag io">I/O</span>
+    <div class="body"><div class="what">Parse sprint.json</div><div class="where">unchanged</div></div></div>
+  <div class="step det"><div class="num">B2</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Verify clean working tree</div><div class="where">unchanged</div></div></div>
+  <div class="step det"><div class="num">B3</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Cut staging branch from base</div><div class="where">unchanged</div></div></div>
+  <div class="step io added"><div class="num">B3.5</div><span class="tag io">I/O</span>
+    <div class="body"><div class="what">Read prior sprint-state.json if <code>--resume</code></div>
+    <div class="where">N4 — skip merged stories on resume</div></div></div>
+  <div class="step io"><div class="num">B4</div><span class="tag io">I/O</span>
+    <div class="body"><div class="what">Init sprint-state.json</div><div class="where">unchanged</div></div></div>
+  <div class="step det"><div class="num">B5</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Topo sort stories</div><div class="where">unchanged</div></div></div>
+  <div class="step det added"><div class="num">B6</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Build parallel ordering layers</div>
+    <div class="where">N6 — group stories with no inter-deps for concurrent execution</div></div></div>
+</div>
+
+<h3 style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:24px 0 12px;">Per story</h3>
+<div class="flow">
+  <div class="step det added"><div class="num">S-pre</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Allocate <code>git worktree</code> for this story</div>
+    <div class="where">N6 — replaces single-cwd serial run</div></div></div>
+  <div class="step det added"><div class="num">S-iso</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Spawn podman container, mount worktree + <code>~/.pi</code></div>
+    <div class="where">N7 — isolation, fresh deps per story</div></div></div>
+
+  <div class="step det"><div class="num">S0</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Check unmet dependencies</div><div class="where">unchanged</div></div></div>
+  <div class="step llm"><div class="num">S1</div><span class="tag llm">LLM</span>
+    <div class="body"><div class="what">qa-author drafts acceptance.sh</div><div class="where">unchanged</div></div></div>
+  <div class="step det added"><div class="num">S1.5</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Validate acceptance.sh syntax + optional user OK</div>
+    <div class="where">N2 — <code>bash -n</code> + interactive flag for prose input</div></div></div>
+
+  <div class="step llm added"><div class="num">S1.6</div><span class="tag llm">LLM</span>
+    <div class="body"><div class="what">team-lead decomposes (large stories only)</div>
+    <div class="where">N8 — JSON tasks list, harness validates count + scope. Skipped for small stories.</div></div></div>
+
+  <div class="step det"><div class="num">S2</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Cut feature branch</div><div class="where">unchanged (now on the worktree)</div></div></div>
+  <div class="step llm"><div class="num">S3</div><span class="tag llm">LLM</span>
+    <div class="body"><div class="what">worker implements + commits</div><div class="where">unchanged (runs inside container)</div></div></div>
+  <div class="step det"><div class="num">S4</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Verify commits exist</div><div class="where">unchanged</div></div></div>
+
+  <div class="step det added"><div class="num">S4.5</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Start configured server, wait for readiness</div>
+    <div class="where">N3 — <code>sprint.server_command</code> + curl probe; killed on teardown</div></div></div>
+
+  <div class="step det"><div class="num">S5</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Run test_command</div><div class="where">unchanged</div></div></div>
+
+  <div class="step llm added"><div class="num">S5.5</div><span class="tag llm">LLM</span>
+    <div class="body"><div class="what">worker retry on test_command failure (max 1)</div>
+    <div class="where">N1 — re-prompt with failure tail; bounded; hard cap</div></div></div>
+
+  <div class="step det"><div class="num">S6</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Run acceptance.sh</div><div class="where">unchanged</div></div></div>
+  <div class="step det"><div class="num">S7</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Merge feature → staging</div>
+    <div class="where">N6 — merge serialized even when stories run in parallel</div></div></div>
+
+  <div class="step io added"><div class="num">S8</div><span class="tag io">I/O</span>
+    <div class="body"><div class="what">Aggregate token + cost telemetry</div>
+    <div class="where">N10 — pi JSON stream → sprint-state.json totals</div></div></div>
+</div>
+
+<h3 style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:24px 0 12px;">Teardown</h3>
+<div class="flow">
+  <div class="step io"><div class="num">T1</div><span class="tag io">I/O</span>
+    <div class="body"><div class="what">Final state write + checkout staging</div><div class="where">unchanged</div></div></div>
+  <div class="step io added"><div class="num">T2</div><span class="tag io">I/O</span>
+    <div class="body"><div class="what">Emit TAKT-shaped retro state</div>
+    <div class="where">N5 — explicit writer for whatever TAKT consumer expects</div></div></div>
+  <div class="step det added"><div class="num">T3</div><span class="tag det">DET</span>
+    <div class="body"><div class="what">Tear down containers + worktrees</div>
+    <div class="where">N6/N7 — release sandbox state, prune worktree dirs</div></div></div>
+</div>
+</div>
+
+<h2>v1 → v2 deltas summary</h2>
+<table>
+  <thead>
+    <tr><th style="width:80px;">From</th><th>v1 has</th><th>v2 adds</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>N1</td><td>1 worker call, fail = abandon</td><td>1 retry pass when test_command fails</td></tr>
+    <tr><td>N2</td><td>qa-author output trusted</td><td><code>bash -n</code> validation + optional user OK on prose input</td></tr>
+    <tr><td>N3</td><td>acceptance assumes server already up</td><td>harness starts server, probes readiness, kills on done</td></tr>
+    <tr><td>N4</td><td>state file written; not read on restart</td><td><code>--resume</code> reads state, skips merged stories</td></tr>
+    <tr><td>N5</td><td>state shape is custom</td><td>explicit TAKT consumer-shape writer at teardown</td></tr>
+    <tr><td>N6</td><td>strictly sequential stories</td><td>git worktrees + parallel layers, serialized merge</td></tr>
+    <tr><td>N7</td><td>runs on host</td><td>each worker in podman container with mounted pi auth</td></tr>
+    <tr><td>N8</td><td>worker handles whole story</td><td>optional team-lead JSON decomposition for large stories</td></tr>
+    <tr><td>N9</td><td><code>owner_team</code> ignored</td><td>per-team prompts, scopes, model tiers</td></tr>
+    <tr><td>N10</td><td>no cost telemetry</td><td>per-call usage aggregated into state file</td></tr>
+  </tbody>
+</table>
+
 <div class="footnote">
-  Source: <code>pi-team-lean/src/</code> at commit 1e0d54b. Total 387 LOC across 5 files. No runtime dependencies.
+  Source: <code>pi-team-lean/src/</code> at commit 1e0d54b. Total 387 LOC across 5 files. No runtime dependencies.<br>
+  v2 items are <strong>not</strong> committed code — they are paths forward, gated on real signal from MVP runs.
 </div>
 
 </body>
