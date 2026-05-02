@@ -64,7 +64,8 @@ const main = async (): Promise<void> => {
 
   const sprint: Sprint = JSON.parse(readFileSync(sprintPath, "utf8"));
   const baseBranch = sprint.base_branch ?? "main";
-  const stagingBranch = sprint.staging_branch ?? `pi-team-lean/staging-${Date.now()}`;
+  const runId = sprint.staging_branch ? sprint.staging_branch.split("/").pop()! : `${Date.now()}`;
+  const stagingBranch = sprint.staging_branch ?? `pi-team-lean/${runId}/staging`;
   const testCommand = sprint.test_command ?? "npm test";
   const stateDir = join(repoCwd, ".pi-team-lean");
   const acceptDir = join(stateDir, "acceptance");
@@ -130,7 +131,7 @@ const main = async (): Promise<void> => {
     }
 
     // 2. Cut feature branch from staging, run worker
-    const featureBranch = `pi-team-lean/${stagingBranch.split("/").pop()}/story-${story.id}`;
+    const featureBranch = `pi-team-lean/${runId}/story-${story.id}`;
     cutBranch(featureBranch, stagingBranch, repoCwd);
     ss.branch = featureBranch;
     persist();
