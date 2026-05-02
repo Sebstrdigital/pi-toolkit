@@ -11,7 +11,9 @@ import {
   mergeNoFf,
   commitsOnBranch,
   currentBranch,
+  diffBetween,
 } from "./git.js";
+import { runPaths, writeArtifact, writeJsonArtifact, ARTIFACTS } from "./runs.js";
 import type { Sprint, SprintState, StoryState, Story } from "./types.js";
 
 const log = (msg: string): void => console.log(`[pi-team-lean] ${msg}`);
@@ -70,9 +72,11 @@ const main = async (): Promise<void> => {
   const stateDir = join(repoCwd, ".pi-team-lean");
   const acceptDir = join(stateDir, "acceptance");
   const statePath = join(stateDir, "sprint-state.json");
-  mkdirSync(acceptDir, { recursive: true });
+  const paths = runPaths(repoCwd, runId);
 
   ensureCleanTree(repoCwd);
+  mkdirSync(acceptDir, { recursive: true });
+  mkdirSync(paths.root, { recursive: true });
   log(`Repo: ${repoCwd}`);
   log(`Base: ${baseBranch}  Staging: ${stagingBranch}`);
 
@@ -90,7 +94,13 @@ const main = async (): Promise<void> => {
     staging_branch: stagingBranch,
     stories: Object.fromEntries(sprint.stories.map((s) => [s.id, { status: "pending" } as StoryState])),
   };
-  const persist = (): void => writeFileSync(statePath, JSON.stringify(state, null, 2));
+  const persist = (): void => {
+    writeFileSync(statePath, JSON.stringify(state, null, 2));
+    for (const [sid, ss] of Object.entries(state.stories)) {
+      if (ss.status === "pending") continue;
+      writeJsonArtifact(paths.artifact(sid, ARTIFACTS.meta), { id: sid, ...ss });
+    }
+  };
   persist();
 
   const ordered = topoSort(sprint.stories);
@@ -111,6 +121,8 @@ const main = async (): Promise<void> => {
     persist();
     log(`---- ${story.id}: ${story.title} ----`);
 
+    paths.storyDir(story.id);
+
     // 1. QA author bash assertions (one shot)
     const acceptPath = join(acceptDir, `${story.id}.sh`);
     if (!existsSync(acceptPath)) {
@@ -129,6 +141,7 @@ const main = async (): Promise<void> => {
     } else {
       log(`qa-author: reusing existing acceptance.sh`);
     }
+    writeArtifact(paths.artifact(story.id, ARTIFACTS.qaScript), readFileSync(acceptPath, "utf8"));
 
     // 2. Cut feature branch from staging, run worker
     const featureBranch = `pi-team-lean/${runId}/story-${story.id}`;
@@ -145,6 +158,9 @@ const main = async (): Promise<void> => {
         if (line.trim()) console.log(`  pi> ${line}`);
       },
     );
+
+    writeArtifact(paths.artifact(story.id, ARTIFACTS.workerStdout), w.stdout);
+    writeArtifact(paths.artifact(story.id, ARTIFACTS.workerStderr), w.stderr);
 
     if (w.exitCode !== 0) {
       ss.status = "failed";
@@ -168,11 +184,13 @@ const main = async (): Promise<void> => {
       continue;
     }
     ss.commits = newCommits;
+    writeArtifact(paths.artifact(story.id, ARTIFACTS.workerDiff), diffBetween(stagingBranch, featureBranch, repoCwd));
     persist();
 
     // 4. Run test command
     log(`verify: ${story.test_command ?? testCommand}`);
     const t = runTestCommand(story.test_command ?? testCommand, repoCwd);
+    writeArtifact(paths.artifact(story.id, ARTIFACTS.testCommandOutput), t.output);
     if (!t.ok) {
       ss.status = "failed";
       ss.failure_reason = `test_command failed:\n${t.output.slice(-1500)}`;
@@ -186,6 +204,7 @@ const main = async (): Promise<void> => {
     // 5. Run acceptance.sh
     log(`accept: ${acceptPath}`);
     const a = runTestCommand(`bash ${acceptPath}`, repoCwd);
+    writeArtifact(paths.artifact(story.id, ARTIFACTS.qaScriptOutput), a.output);
     if (!a.ok) {
       ss.status = "failed";
       ss.failure_reason = `acceptance failed:\n${a.output.slice(-1500)}`;

@@ -42,3 +42,8 @@ export const commitsOnBranch = (branch: string, sinceBranch: string, cwd: string
   const r = tryGit(["log", `${sinceBranch}..${branch}`, "--format=%H"], cwd);
   return r.ok && r.out ? r.out.split("\n") : [];
 };
+
+export const diffBetween = (fromBranch: string, toBranch: string, cwd: string): string => {
+  const r = tryGit(["diff", `${fromBranch}...${toBranch}`], cwd);
+  return r.ok ? r.out : "";
+};
