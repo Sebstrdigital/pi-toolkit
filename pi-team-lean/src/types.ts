@@ -14,7 +14,10 @@ export interface Sprint {
   worker_model?: string;
   qa_model?: string;
   judge_model?: string;
+  reviewer_model?: string;
   feature_path?: string;
+  enable_reviewer?: boolean;
+  max_review_iterations?: number;
   stories: Story[];
 }
 

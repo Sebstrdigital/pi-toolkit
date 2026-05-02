@@ -16,6 +16,7 @@ import {
 import { runPaths, writeArtifact, writeJsonArtifact, ARTIFACTS } from "./runs.js";
 import { scenariosForStory } from "./features.js";
 import { judgeScenarios } from "./scenarios.js";
+import { runReview, reviewerFeedbackForWorker, type ReviewResult } from "./reviewer.js";
 import type { Sprint, SprintState, StoryState, Story } from "./types.js";
 
 const log = (msg: string): void => console.log(`[pi-team-lean] ${msg}`);
@@ -60,7 +61,7 @@ const runTestCommand = (cmd: string, cwd: string): { ok: boolean; output: string
 const main = async (): Promise<void> => {
   const sprintPath = process.argv[2];
   if (!sprintPath) {
-    console.error("Usage: pi-team-lean <sprint.json> [--cwd <repo>] [--story <id>]");
+    console.error("Usage: pi-team-lean <sprint.json> [--cwd <repo>]");
     process.exit(2);
   }
   const cwdFlagIdx = process.argv.indexOf("--cwd");
@@ -144,45 +145,72 @@ const main = async (): Promise<void> => {
     ss.branch = featureBranch;
     persist();
 
-    log(`worker: implementing on ${featureBranch}`);
-    const w = await runPi(
-      workerPrompt(story, "", story.test_command ?? testCommand),
-      repoCwd,
-      sprint.worker_model,
-      (line) => {
-        if (line.trim()) console.log(`  pi> ${line}`);
-      },
-    );
-    writeArtifact(paths.artifact(story.id, ARTIFACTS.workerStdout), w.stdout);
-    writeArtifact(paths.artifact(story.id, ARTIFACTS.workerStderr), w.stderr);
+    const maxIter = sprint.enable_reviewer ? Math.max(1, sprint.max_review_iterations ?? 2) : 1;
+    let workerDiff = "";
+    let lastReview: ReviewResult | undefined;
+    let workerFailed = false;
 
-    if (w.exitCode !== 0) {
-      ss.status = "failed";
-      ss.failure_reason = `worker exit ${w.exitCode}\n${w.stderr.slice(0, 500)}`;
+    for (let iter = 1; iter <= maxIter; iter++) {
+      const feedback = lastReview ? reviewerFeedbackForWorker(lastReview) : "";
+      log(`worker: implementing on ${featureBranch} (iter ${iter}/${maxIter}${feedback ? ", with review feedback" : ""})`);
+      const w = await runPi(
+        workerPrompt(story, "", story.test_command ?? testCommand, feedback),
+        repoCwd,
+        sprint.worker_model,
+        (line) => {
+          if (line.trim()) console.log(`  pi> ${line}`);
+        },
+      );
+      writeArtifact(paths.artifact(story.id, `worker.iter${iter}.stdout.log`), w.stdout);
+      writeArtifact(paths.artifact(story.id, `worker.iter${iter}.stderr.log`), w.stderr);
+      writeArtifact(paths.artifact(story.id, ARTIFACTS.workerStdout), w.stdout);
+      writeArtifact(paths.artifact(story.id, ARTIFACTS.workerStderr), w.stderr);
+
+      if (w.exitCode !== 0) {
+        ss.status = "failed";
+        ss.failure_reason = `worker exit ${w.exitCode} (iter ${iter})\n${w.stderr.slice(0, 500)}`;
+        workerFailed = true;
+        break;
+      }
+
+      const commitsSoFar = commitsOnBranch(featureBranch, stagingBranch, repoCwd);
+      if (commitsSoFar.length === 0) {
+        ss.status = "failed";
+        ss.failure_reason = `worker exited but made no commits (iter ${iter})`;
+        workerFailed = true;
+        break;
+      }
+      ss.commits = commitsSoFar;
+      workerDiff = diffBetween(stagingBranch, featureBranch, repoCwd);
+      writeArtifact(paths.artifact(story.id, ARTIFACTS.workerDiff), workerDiff);
+      persist();
+
+      if (!sprint.enable_reviewer) break;
+
+      log(`reviewer: pass ${iter}/${maxIter}`);
+      const review = await runReview(story, workerDiff, repoCwd, sprint.reviewer_model, lastReview);
+      writeJsonArtifact(paths.artifact(story.id, `reviewer.iter${iter}.json`), review);
+      writeJsonArtifact(paths.artifact(story.id, ARTIFACTS.reviewerJudgement), review);
+      const mustFix = review.issues.filter((i) => i.severity === "must_fix");
+      log(`reviewer: ${review.verdict} (${mustFix.length} must_fix, ${review.issues.length - mustFix.length} nice_to_have)`);
+      for (const m of mustFix) log(`        ${m.category} ${m.file}${m.line ? `:${m.line}` : ""} — ${m.problem}`);
+      lastReview = review;
+      if (review.verdict === "approve") break;
+      if (iter === maxIter) {
+        log(`WARN  ${story.id}: reviewer still requesting changes after ${maxIter} iterations — proceeding (lenient)`);
+        break;
+      }
+    }
+
+    if (workerFailed) {
       checkout(stagingBranch, repoCwd);
-      log(`FAIL  ${story.id}: worker exit`);
+      log(`FAIL  ${story.id}: ${ss.failure_reason}`);
       ss.ended_at = new Date().toISOString();
       persist();
       continue;
     }
 
-    // 2. Verify worker actually committed
-    const newCommits = commitsOnBranch(featureBranch, stagingBranch, repoCwd);
-    if (newCommits.length === 0) {
-      ss.status = "failed";
-      ss.failure_reason = "worker exited but made no commits";
-      checkout(stagingBranch, repoCwd);
-      log(`FAIL  ${story.id}: no commits`);
-      ss.ended_at = new Date().toISOString();
-      persist();
-      continue;
-    }
-    ss.commits = newCommits;
-    const workerDiff = diffBetween(stagingBranch, featureBranch, repoCwd);
-    writeArtifact(paths.artifact(story.id, ARTIFACTS.workerDiff), workerDiff);
-    persist();
-
-    // 3. Run test command
+    // 4. Run test command
     log(`verify: ${story.test_command ?? testCommand}`);
     const t = runTestCommand(story.test_command ?? testCommand, repoCwd);
     writeArtifact(paths.artifact(story.id, ARTIFACTS.testCommandOutput), t.output);
@@ -196,7 +224,7 @@ const main = async (): Promise<void> => {
       continue;
     }
 
-    // 4. Generate qa-script with diff visibility, then run it
+    // 5. Generate qa-script with diff visibility, then run it
     log(`qa-script: drafting (diff-aware)`);
     const qa = await runPi(qaScriptPrompt(story, workerDiff), repoCwd, sprint.qa_model);
     if (qa.exitCode !== 0 || !qa.stdout.trim()) {
@@ -225,7 +253,7 @@ const main = async (): Promise<void> => {
       continue;
     }
 
-    // 5. Scenario-judge (lenient: warn but don't block)
+    // 5b. Scenario-judge (lenient: warn but don't block)
     const scenarios = scenariosForStory(sprint.feature_path, story.id, story.feature_story_id);
     if (scenarios.length > 0) {
       log(`judge: ${scenarios.length} scenarios via 3-judge majority`);

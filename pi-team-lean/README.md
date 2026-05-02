@@ -16,10 +16,17 @@ npm link
 In any git repo with `pi` available on PATH:
 
 ```sh
-pi-team-lean ./sprint.json
+pi-team-lean ./pi-team-lean-sprint.json
 ```
 
-Or `pi-team-lean ./sprint.json --cwd /path/to/target/repo`.
+Or `pi-team-lean ./pi-team-lean-sprint.json --cwd /path/to/target/repo`.
+
+To run only one story (skips dependency check):
+```sh
+pi-team-lean ./pi-team-lean-sprint.json --story S2-extend-muter-registry
+```
+
+**Convention:** name your sprint file `pi-team-lean-sprint.json` and add it to `.gitignore`. Same file, every repo, never tracked.
 
 ## Sprint format (`sprint.json`)
 

@@ -44,7 +44,12 @@ The diff above shows what the worker actually built. Bind your assertions to the
 
 Begin now.`;
 
-export const workerPrompt = (story: Story, scopeHint: string, testCommand: string): string => `You are implementing a single user story end-to-end on the current git branch. Make the code changes, run the tests, commit, and stop.
+export const workerPrompt = (
+  story: Story,
+  scopeHint: string,
+  testCommand: string,
+  reviewFeedback: string = "",
+): string => `You are implementing a single user story end-to-end on the current git branch. Make the code changes, run the tests, commit, and stop.
 
 # Story
 
@@ -60,7 +65,7 @@ ${story.body}
 - Run \`${testCommand}\` after your changes. If it fails, fix and re-run until it passes (max 3 attempts).
 - Commit with: \`git add -A && git commit -m "feat: <story-id> <short summary>"\`
 - Do NOT create branches, merge, push, or run other git ops beyond add/commit.
-
+${reviewFeedback ? `\n${reviewFeedback}\n` : ""}
 # Done
 
 When tests pass and you've committed, stop. The harness will verify and merge.`;
