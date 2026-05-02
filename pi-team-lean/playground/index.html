@@ -516,6 +516,48 @@
     <div class="rdesc">Pi's JSON stream emits per-call usage. Aggregate into <code>sprint-state.json</code>. Cheap to add. Triggers when first sprint costs surprise.</div>
     <div class="rcost">Small</div>
   </div>
+  <div class="roadmap-row">
+    <div class="rid">N11</div>
+    <div class="rname">Project-resident memory: <code>.pi-team/</code></div>
+    <div class="rdesc">A directory committed to the target repo that the team reads on every run. Initialized once via <code>pi-team-lean init</code>, grows over time. Survives across sprints. Makes the team get better in <em>this</em> project.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N12</div>
+    <div class="rname">Conventions doc (<code>.pi-team/CONVENTIONS.md</code>)</div>
+    <div class="rdesc">Hand-written code style + architectural decisions. Loaded into worker prompt verbatim. Boring but load-bearing — this is where "we always inject repos via parameters, never instantiate" lives. Worker reads, never writes.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N13</div>
+    <div class="rname">Style guide (<code>.pi-team/STYLE.md</code>)</div>
+    <div class="rdesc">Naming, formatting, file layout, test patterns. Separate from CONVENTIONS so reviewers and humans can edit it without churning architecture decisions. Loaded into worker + qa-author prompts.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N14</div>
+    <div class="rname">Experience log (<code>.pi-team/EXPERIENCE.md</code>)</div>
+    <div class="rdesc">Append-only. After every <em>failed</em> story (test fail, acceptance fail, or human revert), the harness asks pi for a one-paragraph "what went wrong, what to avoid next time." Written deterministically into the file. Worker reads on next run. Slow learning, no LLM judgment in the loop.</div>
+    <div class="rcost">Medium</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N15</div>
+    <div class="rname">Per-role briefs (<code>.pi-team/roles/&lt;role&gt;.md</code>)</div>
+    <div class="rdesc">Replaces the old "expertise files" idea. One markdown per role (worker, qa-author, future team-lead). Project-specific framing: "the worker on <em>this</em> project owns repository code in <code>src/api/</code>, not migrations." Edited by humans; loaded into the matching role's prompt.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N16</div>
+    <div class="rname"><code>pi-team-lean init</code> bootstrapper</div>
+    <div class="rdesc">First-run command for a new project. Asks the user (or runs deterministically with sensible defaults) and scaffolds <code>.pi-team/</code> with empty CONVENTIONS, STYLE, EXPERIENCE, and one role brief per declared team. Commits the scaffold. Idempotent.</div>
+    <div class="rcost">Small</div>
+  </div>
+  <div class="roadmap-row">
+    <div class="rid">N17</div>
+    <div class="rname">Auto-pinned learnings on merge</div>
+    <div class="rdesc">After a story merges cleanly, harness asks pi for a one-line "is there a generalizable convention this story revealed that should be pinned?" — most answers are "no." When yes, append to <code>EXPERIENCE.md</code> with the merge SHA. Eventually the human promotes hot lessons into <code>CONVENTIONS.md</code>.</div>
+    <div class="rcost">Medium</div>
+  </div>
 </div>
 
 <h2>v2 flow — same skeleton, additions highlighted</h2>
@@ -605,6 +647,56 @@
 </div>
 </div>
 
+<h2>Project-resident memory layout (N11–N17)</h2>
+<div class="sub" style="margin-bottom:16px;">Lives at <code>&lt;target-repo&gt;/.pi-team/</code>, committed alongside the code. Owned by the team for this project and grows with it. v1 has none of this — every sprint starts from zero. v2 reads from this dir on every prompt assembly.</div>
+
+<div class="grid2">
+  <div class="card">
+    <h3>Hand-written, slow-changing</h3>
+    <ul>
+      <li><code>CONVENTIONS.md</code> — architectural decisions ("DI, no inline instantiation"). Loaded into <strong>worker</strong> prompt.</li>
+      <li><code>STYLE.md</code> — naming, formatting, layout, test patterns. Loaded into <strong>worker + qa-author</strong>.</li>
+      <li><code>roles/worker.md</code>, <code>roles/qa-author.md</code> — project-specific framing per role. Replaces the old "expertise" files.</li>
+    </ul>
+    <div class="extra" style="margin-top:10px;">Read by harness, written by humans. Pi never edits these.</div>
+  </div>
+  <div class="card">
+    <h3>Auto-grown, append-only</h3>
+    <ul>
+      <li><code>EXPERIENCE.md</code> — one paragraph per failed story (root-cause + "avoid next time"). Worker reads it on every run.</li>
+      <li><code>LEARNINGS.md</code> (optional) — one-line generalizable observations after clean merges. Promoted by humans into CONVENTIONS over time.</li>
+    </ul>
+    <div class="extra" style="margin-top:10px;">Read by harness, written by harness (with one short LLM call to draft the entry, then deterministic append + commit).</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px;">
+  <h3>Where each artifact enters the v2 flow</h3>
+  <table>
+    <thead>
+      <tr><th style="width:120px;">Step</th><th style="width:200px;">Reads</th><th>Writes</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>S1 qa-author</td><td>STYLE, roles/qa-author.md, EXPERIENCE</td><td>—</td></tr>
+      <tr><td>S3 worker</td><td>CONVENTIONS, STYLE, roles/worker.md, EXPERIENCE</td><td>code (committed via worker)</td></tr>
+      <tr><td>S5/S6 fail path</td><td>—</td><td>EXPERIENCE.md (one entry per fail)</td></tr>
+      <tr><td>S7 merge succeeds</td><td>—</td><td>LEARNINGS.md (only when N17 says "yes")</td></tr>
+      <tr><td>T1 teardown</td><td>—</td><td>commit on staging: "chore: pi-team learnings from sprint &lt;id&gt;"</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>How the team gets better at <em>this</em> project</h2>
+<div class="card">
+  <ul style="margin-left:0;padding-left:18px;line-height:1.7;">
+    <li><strong>Initialize once</strong> with <code>pi-team-lean init</code> (N16). Scaffolds <code>.pi-team/</code> with empty templates and one role brief per team. Committed.</li>
+    <li><strong>Edit as you learn.</strong> After each sprint, you (the human) pull learnings out of <code>EXPERIENCE.md</code> into <code>CONVENTIONS.md</code> when a pattern proves stable. The team reads CONVENTIONS the next time.</li>
+    <li><strong>Auto-grow on failure.</strong> Every failed story leaves a paragraph. The next worker sees it. Same mistake should not happen twice in a row without effort.</li>
+    <li><strong>No central server, no global memory store.</strong> The whole team's "skill" is just files in the target repo, version-controlled with the code. Roll back the team by reverting the commit.</li>
+    <li><strong>Different projects, different teams.</strong> A pi-team on <code>pi-sandbox</code> develops different conventions than one on <code>dua-cs-agent</code>. Same harness, different memories.</li>
+  </ul>
+</div>
+
 <h2>v1 → v2 deltas summary</h2>
 <table>
   <thead>
@@ -621,6 +713,7 @@
     <tr><td>N8</td><td>worker handles whole story</td><td>optional team-lead JSON decomposition for large stories</td></tr>
     <tr><td>N9</td><td><code>owner_team</code> ignored</td><td>per-team prompts, scopes, model tiers</td></tr>
     <tr><td>N10</td><td>no cost telemetry</td><td>per-call usage aggregated into state file</td></tr>
+    <tr><td>N11–N17</td><td>fresh start every sprint, no project memory</td><td><code>.pi-team/</code> dir: CONVENTIONS, STYLE, role briefs, EXPERIENCE, LEARNINGS — read into prompts, grown across sprints, owned by the human</td></tr>
   </tbody>
 </table>
 
