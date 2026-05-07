@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 export interface RunPaths {
   root: string;
+  events: string;
   storyDir(storyId: string): string;
   artifact(storyId: string, name: string): string;
 }
@@ -11,6 +12,7 @@ export const runPaths = (repoCwd: string, runId: string): RunPaths => {
   const root = join(repoCwd, ".pi-team-lean", "runs", runId);
   return {
     root,
+    events: join(root, "events.jsonl"),
     storyDir: (storyId) => {
       const dir = join(root, storyId);
       mkdirSync(dir, { recursive: true });

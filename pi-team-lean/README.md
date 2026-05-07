@@ -26,6 +26,19 @@ To run only one story (skips dependency check):
 pi-team-lean ./pi-team-lean-sprint.json --story S2-extend-muter-registry
 ```
 
+Open the observer automatically in a new right-side tmux pane when starting a run:
+```sh
+pi-team-lean ./pi-team-lean-sprint.json --cwd /path/to/target/repo --tmux-ui
+# or set PI_TEAM_LEAN_TMUX_UI=1 for orchestrator-launched runs
+```
+
+Observe a live or completed run manually in the terminal dashboard:
+```sh
+pi-team-lean tui --cwd /path/to/target/repo
+# or pin a run id
+pi-team-lean watch --cwd /path/to/target/repo --run staging-2026-05-02
+```
+
 **Convention:** name your sprint file `pi-team-lean-sprint.json` and add it to `.gitignore`. Same file, every repo, never tracked.
 
 ## Sprint format (`sprint.json`)
@@ -61,6 +74,8 @@ For each story (in `depends_on` topological order):
 6. Both pass → harness merges feature → staging (`--no-ff`), marks `merged`.
 
 State is persisted to `.pi-team-lean/sprint-state.json` after every transition. TAKT can read this for retro.
+
+A durable event stream is also written to `.pi-team-lean/runs/<runId>/events.jsonl`. The `watch`/`tui` command tails this file plus `sprint-state.json`, so it can attach to a run started by another orchestrator.
 
 ## What's deterministic vs LLM
 

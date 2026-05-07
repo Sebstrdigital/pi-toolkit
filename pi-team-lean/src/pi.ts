@@ -19,6 +19,7 @@ export const runPi = async (
   model: string | undefined,
   onStdoutLine?: (line: string) => void,
   options?: RunPiOptions,
+  onStderrLine?: (line: string) => void,
 ): Promise<PiResult> => {
   const args = ["-p", "--no-session", "--mode", "text"];
   if (model) args.push("--model", model);
@@ -28,6 +29,7 @@ export const runPi = async (
     let stdout = "";
     let stderr = "";
     let buf = "";
+    let errBuf = "";
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;
     let timeoutTimer: NodeJS.Timeout | undefined;
@@ -58,7 +60,14 @@ export const runPi = async (
       }
     });
     proc.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      if (onStderrLine) {
+        errBuf += text;
+        const lines = errBuf.split("\n");
+        errBuf = lines.pop() ?? "";
+        for (const line of lines) onStderrLine(line);
+      }
     });
     proc.on("error", (err) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -69,6 +78,7 @@ export const runPi = async (
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (killTimer) clearTimeout(killTimer);
       if (onStdoutLine && buf) onStdoutLine(buf);
+      if (onStderrLine && errBuf) onStderrLine(errBuf);
       const exitCode = code ?? (signal ? 124 : 0);
       resolve({ exitCode, stdout, stderr, timedOut });
     });
