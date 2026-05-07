@@ -55,6 +55,8 @@ pi-team-lean watch --cwd /path/to/target/repo --run staging-2026-05-02
       "id": "S1",
       "title": "Add ?completed filter to GET /tasks",
       "body": "As an API consumer, I want to filter tasks by completion status so I can see only what's open.",
+      "repo_path": "api",
+      "base_branch": "main",
       "depends_on": [],
       "test_command": "npm test"
     }
@@ -69,13 +71,15 @@ For each story (in `depends_on` topological order):
 1. **qa-author** (one LLM call) drafts a bash assertion script → `.pi-team-lean/acceptance/<id>.sh`. Cached; reused on retries.
 2. Harness cuts feature branch from staging.
 3. **worker** (one LLM call) implements the story and commits on the feature branch.
-4. Harness runs the project's `test_command`. Fail → revert, mark `failed`, continue.
+4. Harness runs the story's `test_command` in `repo_path` when set, otherwise in `--cwd`. Fail → revert, mark `failed`, continue.
 5. Harness runs the acceptance script. Fail → revert, mark `failed`, continue.
 6. Both pass → harness merges feature → staging (`--no-ff`), marks `merged`.
 
 State is persisted to `.pi-team-lean/sprint-state.json` after every transition. TAKT can read this for retro.
 
 A durable event stream is also written to `.pi-team-lean/runs/<runId>/events.jsonl`. The `watch`/`tui` command tails this file plus `sprint-state.json`, so it can attach to a run started by another orchestrator.
+
+`repo_path` is optional and relative to `--cwd`. Use it for wrapper repositories where stories belong to nested git repos. `base_branch` is also optional at story level and overrides the sprint default for that repo. State and artifacts stay under the orchestrator `--cwd`; branch cuts, worker execution, commit detection, tests, acceptance, judging, and merges happen inside the story repo.
 
 ## What's deterministic vs LLM
 

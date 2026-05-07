@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import type { Sprint } from "./types.js";
+import { join, relative, resolve } from "node:path";
+import type { Sprint, Story } from "./types.js";
 
 export interface PreflightCheck {
   name: string;
@@ -29,6 +29,15 @@ const git = (args: string[], cwd: string): { ok: boolean; out: string } => {
 };
 
 const REQUIRED_GITIGNORE_ENTRIES = ["pi-team-lean-sprint.json", ".pi-team-lean/"];
+
+const resolveStoryRepo = (repo: string, story: Story): string => {
+  const storyRepo = resolve(repo, story.repo_path ?? ".");
+  const rel = relative(repo, storyRepo);
+  if (rel.startsWith("..") || resolve(rel) === rel) {
+    throw new Error(`Story ${story.id} repo_path escapes repo: ${story.repo_path}`);
+  }
+  return storyRepo;
+};
 
 export const runPreflight = (repoCwd: string, sprintPath?: string): PreflightResult => {
   const checks: PreflightCheck[] = [];
@@ -104,17 +113,55 @@ export const runPreflight = (repoCwd: string, sprintPath?: string): PreflightRes
       }
 
       // 5. Base branch exists
-      const baseBranch = sprint.base_branch ?? "main";
-      const baseExists = git(["rev-parse", "--verify", `refs/heads/${baseBranch}`], repo);
-      if (!baseExists.ok) {
+      const storyRepos = new Map<string, Story[]>();
+      try {
+        for (const story of sprint.stories) {
+          const storyRepo = resolveStoryRepo(repo, story);
+          storyRepos.set(storyRepo, [...(storyRepos.get(storyRepo) ?? []), story]);
+        }
+      } catch (e: unknown) {
         checks.push({
-          name: "base-branch",
+          name: "story-repos",
           status: "fail",
-          detail: `Base branch not found: ${baseBranch}`,
+          detail: e instanceof Error ? e.message : String(e),
         });
         hardFail = true;
-      } else {
-        checks.push({ name: "base-branch", status: "pass", detail: baseBranch });
+      }
+
+      for (const [storyRepo, stories] of storyRepos) {
+        const storyIds = stories.map((story) => story.id);
+        const repoCheck = git(["rev-parse", "--is-inside-work-tree"], storyRepo);
+        if (!repoCheck.ok || repoCheck.out !== "true") {
+          checks.push({ name: "story-repo", status: "fail", detail: `${storyRepo} (${storyIds.join(", ")}) is not a git repo` });
+          hardFail = true;
+          continue;
+        }
+
+        const storyDirty = git(["status", "--porcelain"], storyRepo);
+        if (!storyDirty.ok || storyDirty.out) {
+          checks.push({
+            name: "story-clean-tree",
+            status: "fail",
+            detail: storyDirty.ok ? `${storyRepo} dirty:\n${storyDirty.out}` : `${storyRepo}: ${storyDirty.out}`,
+          });
+          hardFail = true;
+        } else {
+          checks.push({ name: "story-clean-tree", status: "pass", detail: `${storyRepo} (${storyIds.join(", ")})` });
+        }
+
+        for (const storyBaseBranch of new Set(stories.map((story) => story.base_branch ?? sprint.base_branch ?? "main"))) {
+          const baseExists = git(["rev-parse", "--verify", `refs/heads/${storyBaseBranch}`], storyRepo);
+          if (!baseExists.ok) {
+            checks.push({
+              name: "base-branch",
+              status: "fail",
+              detail: `Base branch not found in ${storyRepo}: ${storyBaseBranch}`,
+            });
+            hardFail = true;
+          } else {
+            checks.push({ name: "base-branch", status: "pass", detail: `${storyBaseBranch} in ${storyRepo}` });
+          }
+        }
       }
 
       // 6. Test command present (warn-only)

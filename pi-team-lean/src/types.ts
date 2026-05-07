@@ -2,6 +2,8 @@ export interface Story {
   id: string;
   title: string;
   body: string;
+  repo_path?: string;
+  base_branch?: string;
   depends_on?: string[];
   test_command?: string;
   feature_story_id?: string;
@@ -28,6 +30,7 @@ export type StoryStatus = "pending" | "in_progress" | "merged" | "failed" | "ski
 export interface StoryState {
   status: StoryStatus;
   branch?: string;
+  repo_path?: string;
   commits?: string[];
   failure_reason?: string;
   started_at?: string;
