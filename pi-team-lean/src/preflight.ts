@@ -39,11 +39,24 @@ const resolveStoryRepo = (repo: string, story: Story): string => {
   return storyRepo;
 };
 
+const uniqueStoryRepos = (repo: string, sprint: Sprint): Map<string, Story[]> => {
+  const storyRepos = new Map<string, Story[]>();
+  for (const story of sprint.stories) {
+    const storyRepo = resolveStoryRepo(repo, story);
+    storyRepos.set(storyRepo, [...(storyRepos.get(storyRepo) ?? []), story]);
+  }
+  return storyRepos;
+};
+
+const sprintUsesSeparateStoryRepos = (repo: string, storyRepos: Map<string, Story[]>): boolean =>
+  storyRepos.size > 0 && Array.from(storyRepos.keys()).every((storyRepo) => storyRepo !== repo);
+
 export const runPreflight = (repoCwd: string, sprintPath?: string): PreflightResult => {
   const checks: PreflightCheck[] = [];
   let hardFail = false;
 
   const repo = resolve(repoCwd);
+  let storyRepos = new Map<string, Story[]>();
 
   // 1. Repo exists and is a git repo
   const isRepo = git(["rev-parse", "--is-inside-work-tree"], repo);
@@ -53,23 +66,7 @@ export const runPreflight = (repoCwd: string, sprintPath?: string): PreflightRes
   }
   checks.push({ name: "git-repo", status: "pass", detail: repo });
 
-  // 2. Clean working tree
-  const dirty = git(["status", "--porcelain"], repo);
-  if (!dirty.ok) {
-    checks.push({ name: "clean-tree", status: "fail", detail: `git status failed: ${dirty.out}` });
-    hardFail = true;
-  } else if (dirty.out) {
-    checks.push({
-      name: "clean-tree",
-      status: "fail",
-      detail: `Working tree dirty:\n${dirty.out}`,
-    });
-    hardFail = true;
-  } else {
-    checks.push({ name: "clean-tree", status: "pass", detail: "clean" });
-  }
-
-  // 3. Sprint file exists + parses
+  // 2. Sprint file exists + parses
   const resolvedSprintPath = sprintPath
     ? resolve(sprintPath)
     : join(repo, "pi-team-lean-sprint.json");
@@ -112,13 +109,8 @@ export const runPreflight = (repoCwd: string, sprintPath?: string): PreflightRes
         });
       }
 
-      // 5. Base branch exists
-      const storyRepos = new Map<string, Story[]>();
       try {
-        for (const story of sprint.stories) {
-          const storyRepo = resolveStoryRepo(repo, story);
-          storyRepos.set(storyRepo, [...(storyRepos.get(storyRepo) ?? []), story]);
-        }
+        storyRepos = uniqueStoryRepos(repo, sprint);
       } catch (e: unknown) {
         checks.push({
           name: "story-repos",
@@ -128,6 +120,29 @@ export const runPreflight = (repoCwd: string, sprintPath?: string): PreflightRes
         hardFail = true;
       }
 
+      // 5. Clean root working tree only when stories run in the root repo.
+      const dirty = git(["status", "--porcelain"], repo);
+      if (!dirty.ok) {
+        checks.push({ name: "clean-tree", status: "fail", detail: `git status failed: ${dirty.out}` });
+        hardFail = true;
+      } else if (dirty.out && !sprintUsesSeparateStoryRepos(repo, storyRepos)) {
+        checks.push({
+          name: "clean-tree",
+          status: "fail",
+          detail: `Working tree dirty:\n${dirty.out}`,
+        });
+        hardFail = true;
+      } else if (dirty.out) {
+        checks.push({
+          name: "clean-tree",
+          status: "warn",
+          detail: `Wrapper tree dirty but all stories target nested repos:\n${dirty.out}`,
+        });
+      } else {
+        checks.push({ name: "clean-tree", status: "pass", detail: "clean" });
+      }
+
+      // 6. Base branch exists
       for (const [storyRepo, stories] of storyRepos) {
         const storyIds = stories.map((story) => story.id);
         const repoCheck = git(["rev-parse", "--is-inside-work-tree"], storyRepo);

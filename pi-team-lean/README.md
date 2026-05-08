@@ -29,8 +29,10 @@ pi-team-lean ./pi-team-lean-sprint.json --story S2-extend-muter-registry
 Open the observer automatically in a new right-side tmux pane when starting a run:
 ```sh
 pi-team-lean ./pi-team-lean-sprint.json --cwd /path/to/target/repo --tmux-ui
-# or set PI_TEAM_LEAN_TMUX_UI=1 for orchestrator-launched runs
+# or set PI_TEAM_LEAN_TMUX_UI=1 for orchestrator-launched sprint runs
 ```
+
+`PI_TEAM_LEAN_TMUX_UI=1` is ignored for `--story` runs so orchestrators do not open a fresh dashboard pane for every story. Use an explicit `--tmux-ui` with `--story` only when you intentionally want a one-story dashboard.
 
 Observe a live or completed run manually in the terminal dashboard:
 ```sh

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, watch } from "node:fs";
 import { join, resolve } from "node:path";
-import { eventLogPath, latestRunId, readEvents, type TeamLeanEvent } from "./events.js";
+import { eventLogPath, latestRunId, readEvents, type TeamLeanEvent, type TeamLeanPhase } from "./events.js";
 import type { SprintState, StoryStatus } from "./types.js";
 
 const CSI = "\x1b[";
@@ -32,9 +32,71 @@ const truncate = (s: string, n: number): string => {
   return plain.slice(0, n - 1) + "…";
 };
 
+const wrapAnsi = (s: string, width: number, continuationPrefix = ""): string[] => {
+  if (width <= 0) return [""];
+  const lines: string[] = [];
+  let line = "";
+  let lineWidth = 0;
+  let prefix = "";
+
+  const pushLine = () => {
+    lines.push(line.trimEnd());
+    prefix = continuationPrefix;
+    line = prefix;
+    lineWidth = widthOf(prefix);
+  };
+
+  const appendChunk = (chunk: string) => {
+    for (const token of chunk.match(/\x1b\[[0-9;]*m|[^\x1b]/g) ?? []) {
+      if (/^\x1b\[[0-9;]*m$/.test(token)) {
+        line += token;
+        continue;
+      }
+      if (lineWidth >= width) pushLine();
+      line += token;
+      lineWidth += 1;
+    }
+  };
+
+  for (const part of s.split(/(\s+)/)) {
+    if (!part) continue;
+    if (part.includes("\n")) {
+      for (const newlinePart of part.split("\n")) {
+        if (newlinePart) appendChunk(newlinePart);
+        pushLine();
+      }
+      continue;
+    }
+    if (/^\s+$/.test(stripAnsi(part))) {
+      if (lineWidth > widthOf(prefix) && lineWidth < width) appendChunk(" ");
+      continue;
+    }
+    const partWidth = widthOf(part);
+    if (lineWidth > widthOf(prefix) && lineWidth + partWidth > width) pushLine();
+    appendChunk(part);
+  }
+
+  if (line || lines.length === 0) lines.push(line.trimEnd());
+  return lines;
+};
+
 const boxLine = (width: number, left: string, fill = "─", right = ""): string => {
   const inner = Math.max(0, width - widthOf(left) - widthOf(right));
   return left + fill.repeat(inner) + right;
+};
+
+const estimateTokens = (events: TeamLeanEvent[]): number => {
+  const text = events
+    .filter((e): e is Extract<TeamLeanEvent, { type: "pi_stdout" | "pi_stderr" }> => e.type === "pi_stdout" || e.type === "pi_stderr")
+    .map((e) => e.line)
+    .join("\n");
+  return Math.ceil(stripAnsi(text).length / 4);
+};
+
+const formatTokenCount = (tokens: number): string => {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
+  return String(tokens);
 };
 
 const statusIcon = (status: StoryStatus): string => {
@@ -53,8 +115,42 @@ const statusText = (status: StoryStatus): string => {
   return color.dim(status);
 };
 
-const readState = (repoCwd: string): SprintState | undefined => {
-  const path = join(repoCwd, ".pi-team-lean", "sprint-state.json");
+const AGENTS: Array<{ phase: TeamLeanPhase; label: string }> = [
+  { phase: "worker", label: "Worker" },
+  { phase: "reviewer", label: "Reviewer" },
+  { phase: "verify", label: "Verifier" },
+  { phase: "qa-script", label: "QA Script" },
+  { phase: "acceptance", label: "Acceptance" },
+  { phase: "scenario-judge", label: "Judge" },
+];
+
+type AgentPhase = (typeof AGENTS)[number]["phase"];
+type AgentState = { active?: { storyId?: string; detail?: string }; lastOk?: boolean; lastStoryId?: string };
+
+const agentStates = (events: TeamLeanEvent[]): Map<AgentPhase, AgentState> => {
+  const states = new Map<AgentPhase, AgentState>();
+  for (const agent of AGENTS) states.set(agent.phase, {});
+
+  for (const e of events) {
+    if (e.type === "phase_started" && states.has(e.phase as AgentPhase)) {
+      states.set(e.phase as AgentPhase, { ...states.get(e.phase as AgentPhase), active: { storyId: e.storyId, detail: e.detail } });
+    }
+    if (e.type === "phase_finished" && states.has(e.phase as AgentPhase)) {
+      states.set(e.phase as AgentPhase, { active: undefined, lastOk: e.ok, lastStoryId: e.storyId });
+    }
+  }
+
+  return states;
+};
+
+const agentLine = (agent: (typeof AGENTS)[number], state: AgentState | undefined): string => {
+  if (state?.active) return ` ${color.cyan("▶")} ${color.bold(agent.label)}`;
+  if (state?.lastOk === false) return ` ${color.red("✗")} ${agent.label}`;
+  if (state?.lastOk === true) return ` ${color.green("✓")} ${agent.label}`;
+  return ` ${color.dim("○")} ${color.dim(agent.label)}`;
+};
+
+const readJsonState = (path: string): SprintState | undefined => {
   if (!existsSync(path)) return undefined;
   try {
     return JSON.parse(readFileSync(path, "utf8")) as SprintState;
@@ -62,6 +158,12 @@ const readState = (repoCwd: string): SprintState | undefined => {
     return undefined;
   }
 };
+
+const statePath = (repoCwd: string, runId: string): string => join(repoCwd, ".pi-team-lean", "runs", runId, "sprint-state.json");
+const legacyStatePath = (repoCwd: string): string => join(repoCwd, ".pi-team-lean", "sprint-state.json");
+
+const readState = (repoCwd: string, runId: string): SprintState | undefined =>
+  readJsonState(statePath(repoCwd, runId)) ?? readJsonState(legacyStatePath(repoCwd));
 
 const eventLabel = (e: TeamLeanEvent): string => {
   const time = e.timestamp.slice(11, 19);
@@ -97,13 +199,16 @@ const currentActivity = (events: TeamLeanEvent[]): string => {
 const render = (repoCwd: string, runId: string, logPath: string): void => {
   const width = Math.max(60, process.stdout.columns || 100);
   const height = Math.max(20, process.stdout.rows || 32);
-  const state = readState(repoCwd);
+  const state = readState(repoCwd, runId);
   const events = readEvents(logPath);
   const storyWidth = Math.min(38, Math.max(24, Math.floor(width * 0.34)));
   const timelineWidth = width - storyWidth - 3;
   const bodyHeight = height - 7;
   const stories = state ? Object.entries(state.stories) : [];
-  const recentEvents = events.slice(-bodyHeight);
+  const storyRows = Math.min(stories.length, Math.max(3, Math.floor(bodyHeight * 0.45)));
+  const agents = agentStates(events);
+  const timelineRows = events.flatMap((event) => wrapAnsi(eventLabel(event), timelineWidth - 1, color.dim("         ↳ ")));
+  const recentEvents = timelineRows.slice(-bodyHeight);
 
   const lines: string[] = [];
   lines.push(boxLine(width, `┌ ${color.bold("Pi Team Lean")} `, "─", "┐"));
@@ -113,17 +218,23 @@ const render = (repoCwd: string, runId: string, logPath: string): void => {
   lines.push(`│${pad(color.bold(" Stories"), storyWidth)}│${pad(color.bold(" Timeline"), timelineWidth)}│`);
 
   for (let i = 0; i < bodyHeight; i++) {
-    const story = stories[i];
-    const left = story
-      ? ` ${statusIcon(story[1].status)} ${story[0]} ${statusText(story[1].status)}`
-      : "";
+    let left = "";
+    if (i < storyRows) {
+      const story = stories[i];
+      left = story ? ` ${statusIcon(story[1].status)} ${story[0]}` : "";
+    } else if (i === storyRows) {
+      left = boxLine(storyWidth, ` ${color.bold("Agents ")}`, "─");
+    } else {
+      const agent = AGENTS[i - storyRows - 1];
+      left = agent ? agentLine(agent, agents.get(agent.phase)) : "";
+    }
     const event = recentEvents[i];
-    const right = event ? ` ${eventLabel(event)}` : "";
+    const right = event ? ` ${event}` : "";
     lines.push(`│${pad(left, storyWidth)}│${pad(right, timelineWidth)}│`);
   }
 
   lines.push(`├${"─".repeat(width - 2)}┤`);
-  lines.push(`│ ${pad(color.bold("Current: ") + currentActivity(events), width - 4)} │`);
+  lines.push(`│ ${pad(color.bold("Current: ") + currentActivity(events) + color.dim(`  tokens ~${formatTokenCount(estimateTokens(events))}`), width - 4)} │`);
   lines.push(`└${pad(color.dim(" q quit • ctrl-c quit • auto-refreshing "), width - 2,)}┘`);
 
   moveHome();
@@ -145,9 +256,12 @@ export const runWatch = (argv: string[]): number => {
   const rerender = () => render(repoCwd, runId, logPath);
   rerender();
   const interval = setInterval(rerender, 1000);
+  const runStatePath = statePath(repoCwd, runId);
+  const rootStatePath = legacyStatePath(repoCwd);
   const watchers = [
     existsSync(logPath) ? watch(logPath, rerender) : undefined,
-    existsSync(join(repoCwd, ".pi-team-lean", "sprint-state.json")) ? watch(join(repoCwd, ".pi-team-lean", "sprint-state.json"), rerender) : undefined,
+    existsSync(runStatePath) ? watch(runStatePath, rerender) : undefined,
+    existsSync(rootStatePath) ? watch(rootStatePath, rerender) : undefined,
   ].filter(Boolean) as Array<{ close(): void }>;
 
   if (process.stdin.isTTY) {

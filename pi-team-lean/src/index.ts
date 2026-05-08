@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { relative, join, resolve } from "node:path";
 import { runPi } from "./pi.js";
 import { qaScriptPrompt, workerPrompt } from "./prompts.js";
@@ -48,6 +48,36 @@ const topoSort = (stories: Story[]): Story[] => {
 };
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
+
+const branchRunId = (branch: string): string =>
+  branch
+    .replace(/^pi-team-lean\//, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "staging";
+
+const readSprintState = (path: string): SprintState | undefined => {
+  if (!existsSync(path)) return undefined;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as SprintState;
+  } catch {
+    return undefined;
+  }
+};
+
+const initialSprintState = (stories: Story[], baseBranch: string, stagingBranch: string): SprintState => ({
+  started_at: new Date().toISOString(),
+  base_branch: baseBranch,
+  staging_branch: stagingBranch,
+  stories: Object.fromEntries(stories.map((s) => [s.id, { status: "pending" } as StoryState])),
+});
+
+const mergeSprintState = (state: SprintState, stories: Story[]): SprintState => ({
+  ...state,
+  stories: {
+    ...Object.fromEntries(stories.map((s) => [s.id, { status: "pending" } as StoryState])),
+    ...state.stories,
+  },
+});
 
 const openTmuxWatcher = (repoCwd: string, runId: string): void => {
   if (!process.env.TMUX) {
@@ -115,7 +145,9 @@ const main = async (): Promise<void> => {
     process.exit(cliPreflight(process.argv.slice(3)));
   }
   if (process.argv[2] === "watch" || process.argv[2] === "tui") {
-    process.exit(runWatch(process.argv.slice(3)));
+    const code = runWatch(process.argv.slice(3));
+    if (code !== 0) process.exit(code);
+    return;
   }
   const sprintPath = process.argv[2];
   if (!sprintPath) {
@@ -129,33 +161,36 @@ const main = async (): Promise<void> => {
   const repoCwd = cwdFlagIdx > 0 ? resolve(process.argv[cwdFlagIdx + 1]!) : process.cwd();
   const storyFlagIdx = process.argv.indexOf("--story");
   const onlyStory = storyFlagIdx > 0 ? process.argv[storyFlagIdx + 1] : undefined;
-  const tmuxUi = process.argv.includes("--tmux-ui") || process.env.PI_TEAM_LEAN_TMUX_UI === "1";
+  const explicitTmuxUi = process.argv.includes("--tmux-ui");
+  const envTmuxUi = process.env.PI_TEAM_LEAN_TMUX_UI === "1";
+  const tmuxUi = explicitTmuxUi || (envTmuxUi && !onlyStory);
 
   const sprint: Sprint = JSON.parse(readFileSync(sprintPath, "utf8"));
+  const allSprintStories = [...sprint.stories];
   if (onlyStory) {
     const filtered = sprint.stories.filter((s) => s.id === onlyStory);
     if (filtered.length === 0) {
       console.error(`[pi-team-lean] --story ${onlyStory} not found in sprint`);
       process.exit(2);
     }
-    filtered[0]!.depends_on = [];
-    sprint.stories = filtered;
+    sprint.stories = [{ ...filtered[0]!, depends_on: [] }];
     console.log(`[pi-team-lean] Filtered to single story: ${onlyStory} (dependencies cleared)`);
   }
   const baseBranch = sprint.base_branch ?? "main";
-  const runId = sprint.staging_branch ? sprint.staging_branch.split("/").pop()! : `${Date.now()}`;
+  const runId = sprint.staging_branch ? branchRunId(sprint.staging_branch) : `${Date.now()}`;
   const stagingBranch = sprint.staging_branch ?? `pi-team-lean/${runId}/staging`;
   const testCommand = sprint.test_command ?? "npm test";
   const stateDir = join(repoCwd, ".pi-team-lean");
   const acceptDir = join(stateDir, "acceptance");
-  const statePath = join(stateDir, "sprint-state.json");
+  const legacyStatePath = join(stateDir, "sprint-state.json");
   const paths = runPaths(repoCwd, runId);
+  const statePath = paths.state;
   const events = createEventWriter(paths.events);
   const emitArtifact = (storyId: string, name: string, path: string): void =>
     events.emit({ type: "artifact_written", storyId, name, path });
 
-  ensureCleanTree(repoCwd);
   const storyCwds = Array.from(new Set(sprint.stories.map((story) => resolveStoryCwd(repoCwd, story))));
+  if (storyCwds.includes(repoCwd)) ensureCleanTree(repoCwd);
   for (const storyCwd of storyCwds) {
     if (storyCwd !== repoCwd) ensureCleanTree(storyCwd);
   }
@@ -170,20 +205,20 @@ const main = async (): Promise<void> => {
     stagingBranch,
     storyCount: sprint.stories.length,
   });
-  if (tmuxUi) openTmuxWatcher(repoCwd, runId);
+  if (envTmuxUi && onlyStory && !explicitTmuxUi) log("Skipping auto tmux watcher for --story run; existing sprint dashboard should keep showing the full run");
   log(`Repo: ${repoCwd}`);
   events.emit({ type: "log", message: `Repo: ${repoCwd}` });
   log(`Base: ${baseBranch}  Staging: ${stagingBranch}`);
   events.emit({ type: "log", message: `Base: ${baseBranch}  Staging: ${stagingBranch}` });
 
-  const state: SprintState = {
-    started_at: new Date().toISOString(),
-    base_branch: baseBranch,
-    staging_branch: stagingBranch,
-    stories: Object.fromEntries(sprint.stories.map((s) => [s.id, { status: "pending" } as StoryState])),
-  };
+  const stateUniverse = onlyStory ? allSprintStories : sprint.stories;
+  const state: SprintState = mergeSprintState(
+    readSprintState(statePath) ?? readSprintState(legacyStatePath) ?? initialSprintState(stateUniverse, baseBranch, stagingBranch),
+    stateUniverse,
+  );
   const persist = (): void => {
     writeFileSync(statePath, JSON.stringify(state, null, 2));
+    writeFileSync(legacyStatePath, JSON.stringify(state, null, 2));
     events.emit({ type: "state_written", path: statePath });
     for (const [sid, ss] of Object.entries(state.stories)) {
       if (ss.status === "pending") continue;
@@ -191,6 +226,7 @@ const main = async (): Promise<void> => {
     }
   };
   persist();
+  if (tmuxUi) openTmuxWatcher(repoCwd, runId);
 
   const ordered = topoSort(sprint.stories);
 

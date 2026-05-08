@@ -4,6 +4,7 @@ import { join } from "node:path";
 export interface RunPaths {
   root: string;
   events: string;
+  state: string;
   storyDir(storyId: string): string;
   artifact(storyId: string, name: string): string;
 }
@@ -13,6 +14,7 @@ export const runPaths = (repoCwd: string, runId: string): RunPaths => {
   return {
     root,
     events: join(root, "events.jsonl"),
+    state: join(root, "sprint-state.json"),
     storyDir: (storyId) => {
       const dir = join(root, storyId);
       mkdirSync(dir, { recursive: true });
