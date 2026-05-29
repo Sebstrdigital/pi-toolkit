@@ -32,6 +32,14 @@ ${diff.slice(0, 60000)}
 - DO NOT require specific error messages or log strings unless the story body pins them.
 - DO NOT regex over identifier names — names change.
 
+# Hard rules — compiling scratch checks (avoid harness false-negatives)
+
+If your check compiles a throwaway source file (common for typed languages), the compiler invocation must not fail for reasons unrelated to the code under test:
+
+- PREFER running the project's own existing test/build/typecheck command (e.g. \`npm test\`, \`npm run typecheck\`) over a bespoke compiler invocation. The project's tests already passed; lean on its toolchain.
+- For TypeScript specifically: DO NOT write a scratch \`tsconfig.json\` that \`extends\` the project's tsconfig. The project config typically pins \`rootDir\`/\`include\`, and a scratch file placed outside \`rootDir\` fails with \`TS6059: not under rootDir\` regardless of correctness. Instead either (a) put the scratch file INSIDE the project's source root, or (b) invoke the compiler standalone with NO project file: \`npx tsc --noEmit --skipLibCheck <file>.ts\`.
+- Write scratch files under a temp dir you create; never assume you may add files anywhere in the tree.
+
 # Hard rules — what TO do
 
 Prefer (in priority order):
