@@ -20,11 +20,43 @@ import { scenariosForStory } from "./features.js";
 import { judgeScenarios } from "./scenarios.js";
 import { runReview, reviewerFeedbackForWorker, type ReviewResult } from "./reviewer.js";
 import { cliPreflight } from "./preflight.js";
-import type { Sprint, SprintState, StoryState, Story } from "./types.js";
+import type { Sprint, SprintState, StoryState, Story, StoryStatus } from "./types.js";
 
 const DEFAULT_WORKER_TIMEOUT_MIN = 15;
+const DEFAULT_QA_TIMEOUT_MIN = 10;
 
 const log = (msg: string): void => console.log(`[pi-team-lean] ${msg}`);
+
+/** Feedback fed back into the next worker attempt when a phase fails (bounded-retry loop). */
+const workerCrashFeedback = (reason: string, stderr: string): string => `# Previous attempt did not produce a usable commit
+
+${reason}
+
+\`\`\`
+${stderr.slice(-2000)}
+\`\`\`
+
+Implement the story, run the tests, and commit your work with \`git add -A && git commit\`.`;
+
+const testFailureFeedback = (output: string): string => `# Test failure feedback
+
+Your previous commit did not pass the project test command. Find the cause and fix it, then commit again.
+
+\`\`\`
+${output.slice(-4000)}
+\`\`\`
+
+Do not weaken, skip, or delete tests to make them pass. Commit with: \`git add -A && git commit -m "fix: address failing tests"\``;
+
+const acceptanceFailureFeedback = (output: string): string => `# Acceptance failure feedback
+
+The implementation passed unit tests but FAILED the acceptance checks below. The acceptance script encodes the story's intent — make the behaviour satisfy it. Fix and commit again.
+
+\`\`\`
+${output.slice(-4000)}
+\`\`\`
+
+Do not edit the acceptance script — fix the implementation. Commit with: \`git add -A && git commit -m "fix: satisfy acceptance checks"\``;
 
 const topoSort = (stories: Story[]): Story[] => {
   const byId = new Map(stories.map((s) => [s.id, s]));
@@ -201,16 +233,46 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
   ss.branch = featureBranch;
   persist();
 
-  const maxIter = sprint.enable_reviewer ? Math.max(1, sprint.max_review_iterations ?? 2) : 1;
+  const maxIter = Math.max(1, sprint.max_iterations ?? sprint.max_review_iterations ?? 3);
+  const retry = {
+    worker: sprint.retry_on?.worker ?? true,
+    reviewer: sprint.retry_on?.reviewer ?? true,
+    test: sprint.retry_on?.test ?? true,
+    acceptance: sprint.retry_on?.acceptance ?? true,
+  };
+
+  /** Terminal exit for a story: restore staging, record status, emit, persist. */
+  const endStory = (status: StoryStatus, reason: string): void => {
+    ss.status = status;
+    ss.failure_reason = reason;
+    checkout(stagingBranch, storyCwd);
+    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
+    log(`${status === "needs_human" ? "PARK" : "FAIL"}  ${story.id}: ${reason.split("\n")[0]}`);
+    ss.ended_at = new Date().toISOString();
+    events.emit({ type: "story_finished", storyId: story.id, status, failureReason: reason });
+    persist();
+  };
+  const noteRetry = (phase: string, iter: number): void => {
+    log(`retry ${story.id}: ${phase} failed — attempt ${iter + 1}/${maxIter}`);
+    events.emit({ type: "log", message: `retry ${story.id}: ${phase} failed, attempt ${iter + 1}/${maxIter}` });
+  };
+
   let workerDiff = "";
   let lastReview: ReviewResult | undefined;
-  let workerFailed = false;
+  let feedback = "";
 
+  // Bounded delivery loop: worker → reviewer → verify → acceptance. Any phase
+  // failure (with budget + retry enabled) feeds typed feedback back to the next
+  // worker attempt; on cap-exceed the story parks as needs_human (never a silent
+  // merge). A phase whose retry toggle is off fails hard instead of parking.
   for (let iter = 1; iter <= maxIter; iter++) {
-    const feedback = lastReview ? reviewerFeedbackForWorker(lastReview) : "";
+    ss.iterations = iter;
+    persist();
+
+    // 1. Worker implements (sees accumulated feedback from any prior failed phase)
     const timeoutMin = story.worker_timeout_min ?? sprint.worker_timeout_min ?? DEFAULT_WORKER_TIMEOUT_MIN;
     const timeoutMs = timeoutMin * 60 * 1000;
-    log(`worker: implementing on ${featureBranch} (iter ${iter}/${maxIter}${feedback ? ", with review feedback" : ""}, timeout ${timeoutMin}m)`);
+    log(`worker: implementing on ${featureBranch} (iter ${iter}/${maxIter}${feedback ? ", with feedback" : ""}, timeout ${timeoutMin}m)`);
     events.emit({
       type: "phase_started",
       storyId: story.id,
@@ -248,21 +310,26 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     emitArtifact(story.id, ARTIFACTS.workerStderr, workerStderr);
 
     if (w.exitCode !== 0) {
-      ss.status = "failed";
       const reason = w.timedOut ? `worker timed out after ${timeoutMin}m (iter ${iter})` : `worker exit ${w.exitCode} (iter ${iter})`;
-      ss.failure_reason = `${reason}\n${w.stderr.slice(0, 500)}`;
       events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: reason, iteration: iter });
-      workerFailed = true;
-      break;
+      if (retry.worker && iter < maxIter) {
+        feedback = workerCrashFeedback(reason, w.stderr);
+        noteRetry("worker", iter);
+        continue;
+      }
+      return endStory(retry.worker ? "needs_human" : "failed", `${reason}\n${w.stderr.slice(0, 500)}`);
     }
 
     const commitsSoFar = commitsOnBranch(featureBranch, stagingBranch, storyCwd);
     if (commitsSoFar.length === 0) {
-      ss.status = "failed";
-      ss.failure_reason = `worker exited but made no commits (iter ${iter})`;
-      events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: ss.failure_reason, iteration: iter });
-      workerFailed = true;
-      break;
+      const reason = `worker exited but made no commits (iter ${iter})`;
+      events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: reason, iteration: iter });
+      if (retry.worker && iter < maxIter) {
+        feedback = workerCrashFeedback(reason, w.stderr);
+        noteRetry("worker", iter);
+        continue;
+      }
+      return endStory(retry.worker ? "needs_human" : "failed", reason);
     }
     ss.commits = commitsSoFar;
     workerDiff = diffBetween(stagingBranch, featureBranch, storyCwd);
@@ -272,156 +339,144 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: true, detail: `${commitsSoFar.length} commit(s)`, iteration: iter });
     persist();
 
-    if (!sprint.enable_reviewer) break;
-
-    log(`reviewer: pass ${iter}/${maxIter}`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "reviewer", iteration: iter, totalIterations: maxIter });
-    const review = await runReview(story, workerDiff, storyCwd, sprint.reviewer_model, lastReview);
-    const reviewerIterPath = paths.artifact(story.id, `reviewer.iter${iter}.json`);
-    const reviewerJudgementPath = paths.artifact(story.id, ARTIFACTS.reviewerJudgement);
-    writeJsonArtifact(reviewerIterPath, review);
-    emitArtifact(story.id, `reviewer.iter${iter}.json`, reviewerIterPath);
-    writeJsonArtifact(reviewerJudgementPath, review);
-    emitArtifact(story.id, ARTIFACTS.reviewerJudgement, reviewerJudgementPath);
-    const mustFix = review.issues.filter((i) => i.severity === "must_fix");
-    log(`reviewer: ${review.verdict} (${mustFix.length} must_fix, ${review.issues.length - mustFix.length} nice_to_have)`);
-    events.emit({
-      type: "phase_finished",
-      storyId: story.id,
-      phase: "reviewer",
-      ok: review.verdict === "approve",
-      detail: `${review.verdict} (${mustFix.length} must_fix)`,
-      iteration: iter,
-    });
-    for (const m of mustFix) log(`        ${m.category} ${m.file}${m.line ? `:${m.line}` : ""} — ${m.problem}`);
-    lastReview = review;
-    if (review.verdict === "approve") break;
-    if (iter === maxIter) {
-      log(`WARN  ${story.id}: reviewer still requesting changes after ${maxIter} iterations — proceeding (lenient)`);
-      break;
+    // 2. Reviewer gate (optional). On request_changes: feed back and retry, else park/fail.
+    if (sprint.enable_reviewer) {
+      log(`reviewer: pass ${iter}/${maxIter}`);
+      events.emit({ type: "phase_started", storyId: story.id, phase: "reviewer", iteration: iter, totalIterations: maxIter });
+      const review = await runReview(story, workerDiff, storyCwd, sprint.reviewer_model, lastReview);
+      const reviewerIterPath = paths.artifact(story.id, `reviewer.iter${iter}.json`);
+      const reviewerJudgementPath = paths.artifact(story.id, ARTIFACTS.reviewerJudgement);
+      writeJsonArtifact(reviewerIterPath, review);
+      emitArtifact(story.id, `reviewer.iter${iter}.json`, reviewerIterPath);
+      writeJsonArtifact(reviewerJudgementPath, review);
+      emitArtifact(story.id, ARTIFACTS.reviewerJudgement, reviewerJudgementPath);
+      const mustFix = review.issues.filter((i) => i.severity === "must_fix");
+      log(`reviewer: ${review.verdict} (${mustFix.length} must_fix, ${review.issues.length - mustFix.length} nice_to_have)`);
+      events.emit({
+        type: "phase_finished",
+        storyId: story.id,
+        phase: "reviewer",
+        ok: review.verdict === "approve",
+        detail: `${review.verdict} (${mustFix.length} must_fix)`,
+        iteration: iter,
+      });
+      for (const m of mustFix) log(`        ${m.category} ${m.file}${m.line ? `:${m.line}` : ""} — ${m.problem}`);
+      lastReview = review;
+      if (review.verdict !== "approve") {
+        if (retry.reviewer && iter < maxIter) {
+          feedback = reviewerFeedbackForWorker(review);
+          noteRetry("reviewer", iter);
+          continue;
+        }
+        return endStory(
+          retry.reviewer ? "needs_human" : "failed",
+          `reviewer still requesting changes after ${iter} iteration(s); ${mustFix.length} must_fix unresolved`,
+        );
+      }
     }
-  }
 
-  if (workerFailed) {
-    checkout(stagingBranch, storyCwd);
-    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-    log(`FAIL  ${story.id}: ${ss.failure_reason}`);
-    ss.ended_at = new Date().toISOString();
-    events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
-    persist();
-    return;
-  }
-
-  // 4. Run test command
-  log(`verify: ${story.test_command ?? testCommand}`);
-  events.emit({ type: "phase_started", storyId: story.id, phase: "verify", detail: story.test_command ?? testCommand });
-  const t = runTestCommand(story.test_command ?? testCommand, storyCwd);
-  const testOutputPath = paths.artifact(story.id, ARTIFACTS.testCommandOutput);
-  writeArtifact(testOutputPath, t.output);
-  emitArtifact(story.id, ARTIFACTS.testCommandOutput, testOutputPath);
-  events.emit({ type: "test_output", storyId: story.id, phase: "verify", ok: t.ok, tail: t.output.split("\n").slice(-80).join("\n") });
-  events.emit({ type: "phase_finished", storyId: story.id, phase: "verify", ok: t.ok, detail: t.ok ? "tests passed" : "tests failed" });
-  if (!t.ok) {
-    ss.status = "failed";
-    ss.failure_reason = `test_command failed:\n${t.output.slice(-1500)}`;
-    checkout(stagingBranch, storyCwd);
-    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-    log(`FAIL  ${story.id}: tests`);
-    ss.ended_at = new Date().toISOString();
-    events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
-    persist();
-    return;
-  }
-
-  // 5. Generate qa-script with diff visibility, then run it
-  log(`qa-script: drafting (diff-aware)`);
-  events.emit({ type: "phase_started", storyId: story.id, phase: "qa-script", detail: "drafting acceptance script" });
-  const qa = await runPi(
-    qaScriptPrompt(story, workerDiff),
-    storyCwd,
-    sprint.qa_model,
-    (line) => {
-      if (line.trim()) events.emit({ type: "pi_stdout", storyId: story.id, phase: "qa-script", line });
-    },
-    undefined,
-    (line) => {
-      if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "qa-script", line });
-    },
-  );
-  if (qa.exitCode !== 0 || !qa.stdout.trim()) {
-    ss.status = "failed";
-    ss.failure_reason = `qa-script author failed (exit ${qa.exitCode})\n${qa.stderr.slice(0, 500)}`;
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: false, detail: ss.failure_reason });
-    checkout(stagingBranch, storyCwd);
-    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-    log(`FAIL  ${story.id}: ${ss.failure_reason}`);
-    ss.ended_at = new Date().toISOString();
-    events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
-    persist();
-    return;
-  }
-  writeFileSync(acceptPath, qa.stdout);
-  chmodSync(acceptPath, 0o755);
-  const qaScriptPath = paths.artifact(story.id, ARTIFACTS.qaScript);
-  writeArtifact(qaScriptPath, qa.stdout);
-  emitArtifact(story.id, ARTIFACTS.qaScript, qaScriptPath);
-  events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: true, detail: acceptPath });
-
-  log(`accept: ${acceptPath}`);
-  events.emit({ type: "phase_started", storyId: story.id, phase: "acceptance", detail: acceptPath });
-  const a = runTestCommand(`bash ${acceptPath}`, storyCwd);
-  const qaOutputPath = paths.artifact(story.id, ARTIFACTS.qaScriptOutput);
-  writeArtifact(qaOutputPath, a.output);
-  emitArtifact(story.id, ARTIFACTS.qaScriptOutput, qaOutputPath);
-  events.emit({ type: "test_output", storyId: story.id, phase: "acceptance", ok: a.ok, tail: a.output.split("\n").slice(-80).join("\n") });
-  events.emit({ type: "phase_finished", storyId: story.id, phase: "acceptance", ok: a.ok, detail: a.ok ? "acceptance passed" : "acceptance failed" });
-  if (!a.ok) {
-    ss.status = "failed";
-    ss.failure_reason = `acceptance failed:\n${a.output.slice(-1500)}`;
-    checkout(stagingBranch, storyCwd);
-    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-    log(`FAIL  ${story.id}: acceptance`);
-    ss.ended_at = new Date().toISOString();
-    events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
-    persist();
-    return;
-  }
-
-  // 5b. Scenario-judge (lenient: warn but don't block)
-  const scenarios = scenariosForStory(sprint.feature_path, story.id, story.feature_story_id);
-  if (scenarios.length > 0) {
-    log(`judge: ${scenarios.length} scenarios via 3-judge majority`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "scenario-judge", detail: `${scenarios.length} scenarios` });
-    const diff = diffBetween(stagingBranch, featureBranch, storyCwd);
-    const judgement = await judgeScenarios(story, scenarios, diff, t.output, storyCwd, sprint.judge_model);
-    const scenarioJudgementPath = paths.artifact(story.id, ARTIFACTS.scenarioJudgement);
-    writeJsonArtifact(scenarioJudgementPath, judgement);
-    emitArtifact(story.id, ARTIFACTS.scenarioJudgement, scenarioJudgementPath);
-    const failed = judgement.consensus.filter((c) => c.verdict === "fail");
-    const inconclusive = judgement.consensus.filter((c) => c.verdict === "inconclusive");
-    if (failed.length > 0) {
-      log(`WARN  ${story.id}: scenario-judge fail (${failed.length}/${scenarios.length}) — proceeding (lenient)`);
-      for (const f of failed) log(`        ${f.id}: ${f.gaps[0] ?? "no gap reported"}`);
-    } else if (inconclusive.length > 0) {
-      log(`WARN  ${story.id}: scenario-judge inconclusive (${inconclusive.length}/${scenarios.length})`);
-    } else {
-      log(`PASS  ${story.id}: scenarios pass`);
+    // 3. Verify (test command)
+    log(`verify: ${story.test_command ?? testCommand}`);
+    events.emit({ type: "phase_started", storyId: story.id, phase: "verify", detail: story.test_command ?? testCommand });
+    const t = runTestCommand(story.test_command ?? testCommand, storyCwd);
+    const testOutputPath = paths.artifact(story.id, ARTIFACTS.testCommandOutput);
+    writeArtifact(testOutputPath, t.output);
+    emitArtifact(story.id, ARTIFACTS.testCommandOutput, testOutputPath);
+    events.emit({ type: "test_output", storyId: story.id, phase: "verify", ok: t.ok, tail: t.output.split("\n").slice(-80).join("\n") });
+    events.emit({ type: "phase_finished", storyId: story.id, phase: "verify", ok: t.ok, detail: t.ok ? "tests passed" : "tests failed" });
+    if (!t.ok) {
+      if (retry.test && iter < maxIter) {
+        feedback = testFailureFeedback(t.output);
+        noteRetry("verify", iter);
+        continue;
+      }
+      return endStory(retry.test ? "needs_human" : "failed", `test_command failed after ${iter} iteration(s):\n${t.output.slice(-1500)}`);
     }
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "scenario-judge", ok: judgement.overall !== "fail", detail: judgement.overall });
-  } else if (sprint.feature_path) {
-    log(`judge: no scenarios found for ${story.id} in ${sprint.feature_path}`);
-  }
 
-  // 6. Merge feature → staging
-  events.emit({ type: "phase_started", storyId: story.id, phase: "merge", detail: `${featureBranch} → ${stagingBranch}` });
-  mergeNoFf(featureBranch, stagingBranch, `merge: ${story.id} ${story.title}`, storyCwd);
-  events.emit({ type: "git", action: "merge", fromBranch: featureBranch, intoBranch: stagingBranch, message: `merge: ${story.id} ${story.title}` });
-  events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: true, detail: stagingBranch });
-  ss.status = "merged";
-  ss.ended_at = new Date().toISOString();
-  log(`PASS  ${story.id} merged → ${stagingBranch}`);
-  events.emit({ type: "story_finished", storyId: story.id, status: ss.status });
-  persist();
+    // 4. Generate qa-script with diff visibility, then run it
+    log(`qa-script: drafting (diff-aware)`);
+    events.emit({ type: "phase_started", storyId: story.id, phase: "qa-script", detail: "drafting acceptance script" });
+    const qa = await runPi(
+      qaScriptPrompt(story, workerDiff),
+      storyCwd,
+      sprint.qa_model,
+      (line) => {
+        if (line.trim()) events.emit({ type: "pi_stdout", storyId: story.id, phase: "qa-script", line });
+      },
+      { timeoutMs: DEFAULT_QA_TIMEOUT_MIN * 60 * 1000 },
+      (line) => {
+        if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "qa-script", line });
+      },
+    );
+    if (qa.exitCode !== 0 || !qa.stdout.trim()) {
+      const reason = qa.timedOut
+        ? `qa-script author timed out after ${DEFAULT_QA_TIMEOUT_MIN}m`
+        : `qa-script author failed (exit ${qa.exitCode})\n${qa.stderr.slice(0, 500)}`;
+      events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: false, detail: reason });
+      // qa-author is harness infrastructure, not the worker's code — fail hard, don't park.
+      return endStory("failed", reason);
+    }
+    writeFileSync(acceptPath, qa.stdout);
+    chmodSync(acceptPath, 0o755);
+    const qaScriptPath = paths.artifact(story.id, ARTIFACTS.qaScript);
+    writeArtifact(qaScriptPath, qa.stdout);
+    emitArtifact(story.id, ARTIFACTS.qaScript, qaScriptPath);
+    events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: true, detail: acceptPath });
+
+    log(`accept: ${acceptPath}`);
+    events.emit({ type: "phase_started", storyId: story.id, phase: "acceptance", detail: acceptPath });
+    const a = runTestCommand(`bash ${acceptPath}`, storyCwd);
+    const qaOutputPath = paths.artifact(story.id, ARTIFACTS.qaScriptOutput);
+    writeArtifact(qaOutputPath, a.output);
+    emitArtifact(story.id, ARTIFACTS.qaScriptOutput, qaOutputPath);
+    events.emit({ type: "test_output", storyId: story.id, phase: "acceptance", ok: a.ok, tail: a.output.split("\n").slice(-80).join("\n") });
+    events.emit({ type: "phase_finished", storyId: story.id, phase: "acceptance", ok: a.ok, detail: a.ok ? "acceptance passed" : "acceptance failed" });
+    if (!a.ok) {
+      if (retry.acceptance && iter < maxIter) {
+        feedback = acceptanceFailureFeedback(a.output);
+        noteRetry("acceptance", iter);
+        continue;
+      }
+      return endStory(retry.acceptance ? "needs_human" : "failed", `acceptance failed after ${iter} iteration(s):\n${a.output.slice(-1500)}`);
+    }
+
+    // 5. Scenario-judge (lenient: warn but don't block)
+    const scenarios = scenariosForStory(sprint.feature_path, story.id, story.feature_story_id);
+    if (scenarios.length > 0) {
+      log(`judge: ${scenarios.length} scenarios via 3-judge majority`);
+      events.emit({ type: "phase_started", storyId: story.id, phase: "scenario-judge", detail: `${scenarios.length} scenarios` });
+      const diff = diffBetween(stagingBranch, featureBranch, storyCwd);
+      const judgement = await judgeScenarios(story, scenarios, diff, t.output, storyCwd, sprint.judge_model);
+      const scenarioJudgementPath = paths.artifact(story.id, ARTIFACTS.scenarioJudgement);
+      writeJsonArtifact(scenarioJudgementPath, judgement);
+      emitArtifact(story.id, ARTIFACTS.scenarioJudgement, scenarioJudgementPath);
+      const failed = judgement.consensus.filter((c) => c.verdict === "fail");
+      const inconclusive = judgement.consensus.filter((c) => c.verdict === "inconclusive");
+      if (failed.length > 0) {
+        log(`WARN  ${story.id}: scenario-judge fail (${failed.length}/${scenarios.length}) — proceeding (lenient)`);
+        for (const f of failed) log(`        ${f.id}: ${f.gaps[0] ?? "no gap reported"}`);
+      } else if (inconclusive.length > 0) {
+        log(`WARN  ${story.id}: scenario-judge inconclusive (${inconclusive.length}/${scenarios.length})`);
+      } else {
+        log(`PASS  ${story.id}: scenarios pass`);
+      }
+      events.emit({ type: "phase_finished", storyId: story.id, phase: "scenario-judge", ok: judgement.overall !== "fail", detail: judgement.overall });
+    } else if (sprint.feature_path) {
+      log(`judge: no scenarios found for ${story.id} in ${sprint.feature_path}`);
+    }
+
+    // 6. Merge feature → staging — story is green and reviewed
+    events.emit({ type: "phase_started", storyId: story.id, phase: "merge", detail: `${featureBranch} → ${stagingBranch}` });
+    mergeNoFf(featureBranch, stagingBranch, `merge: ${story.id} ${story.title}`, storyCwd);
+    events.emit({ type: "git", action: "merge", fromBranch: featureBranch, intoBranch: stagingBranch, message: `merge: ${story.id} ${story.title}` });
+    events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: true, detail: stagingBranch });
+    ss.status = "merged";
+    ss.ended_at = new Date().toISOString();
+    log(`PASS  ${story.id} merged → ${stagingBranch} (iter ${iter}/${maxIter})`);
+    events.emit({ type: "story_finished", storyId: story.id, status: ss.status });
+    persist();
+    return;
+  }
 };
 
 export interface RunSprintOptions {
