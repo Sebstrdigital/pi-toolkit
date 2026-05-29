@@ -140,6 +140,402 @@ const ensureStagingBranch = (
   }
 };
 
+/**
+ * Per-run state shared across all stories in a sprint. Built once by runSprint
+ * and threaded into each runStory call so a story can run standalone (board /
+ * daemon callers) without re-deriving the whole setup.
+ */
+export interface RunContext {
+  sprint: Sprint;
+  repoCwd: string;
+  baseBranch: string;
+  stagingBranch: string;
+  runId: string;
+  testCommand: string;
+  acceptDir: string;
+  paths: ReturnType<typeof runPaths>;
+  events: ReturnType<typeof createEventWriter>;
+  state: SprintState;
+  persist: () => void;
+  emitArtifact: (storyId: string, name: string, path: string) => void;
+}
+
+/**
+ * Run a single story end-to-end on its own feature branch: worker (+ optional
+ * reviewer loop) → verify → qa-script → acceptance → scenario-judge → merge.
+ * Mutates ctx.state for this story and persists; returns when the story reaches
+ * a terminal state (merged / failed / skipped). Does not throw on story failure.
+ */
+export const runStory = async (story: Story, ctx: RunContext): Promise<void> => {
+  const { sprint, baseBranch, stagingBranch, runId, testCommand, acceptDir, paths, events, state, persist, emitArtifact } = ctx;
+  const ss = state.stories[story.id]!;
+  const blockers = (story.depends_on ?? []).filter((d) => state.stories[d]?.status !== "merged");
+  if (blockers.length > 0) {
+    ss.status = "skipped";
+    ss.failure_reason = `blocked by ${blockers.join(", ")}`;
+    log(`SKIP  ${story.id}: ${ss.failure_reason}`);
+    events.emit({ type: "story_skipped", storyId: story.id, reason: ss.failure_reason });
+    persist();
+    return;
+  }
+
+  ss.status = "in_progress";
+  ss.started_at = new Date().toISOString();
+  ss.repo_path = story.repo_path ?? ".";
+  persist();
+  log(`---- ${story.id}: ${story.title} ----`);
+  events.emit({ type: "story_started", storyId: story.id, title: story.title });
+
+  paths.storyDir(story.id);
+  const acceptPath = join(acceptDir, `${story.id}.sh`);
+  const storyCwd = resolveStoryCwd(ctx.repoCwd, story);
+  const storyBaseBranch = story.base_branch ?? baseBranch;
+  ensureStagingBranch(stagingBranch, storyBaseBranch, storyCwd, events);
+
+  // 1. Cut feature branch from staging, run worker (worker does NOT see acceptance criteria)
+  const featureBranch = `pi-team-lean/${runId}/story-${story.id}`;
+  events.emit({ type: "phase_started", storyId: story.id, phase: "staging", detail: `cut ${featureBranch}` });
+  cutBranch(featureBranch, stagingBranch, storyCwd);
+  events.emit({ type: "git", action: "cut_branch", branch: featureBranch, fromBranch: stagingBranch });
+  events.emit({ type: "phase_finished", storyId: story.id, phase: "staging", ok: true, detail: featureBranch });
+  ss.branch = featureBranch;
+  persist();
+
+  const maxIter = sprint.enable_reviewer ? Math.max(1, sprint.max_review_iterations ?? 2) : 1;
+  let workerDiff = "";
+  let lastReview: ReviewResult | undefined;
+  let workerFailed = false;
+
+  for (let iter = 1; iter <= maxIter; iter++) {
+    const feedback = lastReview ? reviewerFeedbackForWorker(lastReview) : "";
+    const timeoutMin = story.worker_timeout_min ?? sprint.worker_timeout_min ?? DEFAULT_WORKER_TIMEOUT_MIN;
+    const timeoutMs = timeoutMin * 60 * 1000;
+    log(`worker: implementing on ${featureBranch} (iter ${iter}/${maxIter}${feedback ? ", with review feedback" : ""}, timeout ${timeoutMin}m)`);
+    events.emit({
+      type: "phase_started",
+      storyId: story.id,
+      phase: "worker",
+      iteration: iter,
+      totalIterations: maxIter,
+      detail: `${featureBranch}, timeout ${timeoutMin}m`,
+    });
+    const w = await runPi(
+      workerPrompt(story, "", story.test_command ?? testCommand, feedback),
+      storyCwd,
+      sprint.worker_model,
+      (line) => {
+        if (line.trim()) {
+          console.log(`  pi> ${line}`);
+          events.emit({ type: "pi_stdout", storyId: story.id, phase: "worker", line, iteration: iter });
+        }
+      },
+      { timeoutMs },
+      (line) => {
+        if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "worker", line, iteration: iter });
+      },
+    );
+    const workerIterStdout = paths.artifact(story.id, `worker.iter${iter}.stdout.log`);
+    const workerIterStderr = paths.artifact(story.id, `worker.iter${iter}.stderr.log`);
+    const workerStdout = paths.artifact(story.id, ARTIFACTS.workerStdout);
+    const workerStderr = paths.artifact(story.id, ARTIFACTS.workerStderr);
+    writeArtifact(workerIterStdout, w.stdout);
+    emitArtifact(story.id, `worker.iter${iter}.stdout.log`, workerIterStdout);
+    writeArtifact(workerIterStderr, w.stderr);
+    emitArtifact(story.id, `worker.iter${iter}.stderr.log`, workerIterStderr);
+    writeArtifact(workerStdout, w.stdout);
+    emitArtifact(story.id, ARTIFACTS.workerStdout, workerStdout);
+    writeArtifact(workerStderr, w.stderr);
+    emitArtifact(story.id, ARTIFACTS.workerStderr, workerStderr);
+
+    if (w.exitCode !== 0) {
+      ss.status = "failed";
+      const reason = w.timedOut ? `worker timed out after ${timeoutMin}m (iter ${iter})` : `worker exit ${w.exitCode} (iter ${iter})`;
+      ss.failure_reason = `${reason}\n${w.stderr.slice(0, 500)}`;
+      events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: reason, iteration: iter });
+      workerFailed = true;
+      break;
+    }
+
+    const commitsSoFar = commitsOnBranch(featureBranch, stagingBranch, storyCwd);
+    if (commitsSoFar.length === 0) {
+      ss.status = "failed";
+      ss.failure_reason = `worker exited but made no commits (iter ${iter})`;
+      events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: ss.failure_reason, iteration: iter });
+      workerFailed = true;
+      break;
+    }
+    ss.commits = commitsSoFar;
+    workerDiff = diffBetween(stagingBranch, featureBranch, storyCwd);
+    const workerDiffPath = paths.artifact(story.id, ARTIFACTS.workerDiff);
+    writeArtifact(workerDiffPath, workerDiff);
+    emitArtifact(story.id, ARTIFACTS.workerDiff, workerDiffPath);
+    events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: true, detail: `${commitsSoFar.length} commit(s)`, iteration: iter });
+    persist();
+
+    if (!sprint.enable_reviewer) break;
+
+    log(`reviewer: pass ${iter}/${maxIter}`);
+    events.emit({ type: "phase_started", storyId: story.id, phase: "reviewer", iteration: iter, totalIterations: maxIter });
+    const review = await runReview(story, workerDiff, storyCwd, sprint.reviewer_model, lastReview);
+    const reviewerIterPath = paths.artifact(story.id, `reviewer.iter${iter}.json`);
+    const reviewerJudgementPath = paths.artifact(story.id, ARTIFACTS.reviewerJudgement);
+    writeJsonArtifact(reviewerIterPath, review);
+    emitArtifact(story.id, `reviewer.iter${iter}.json`, reviewerIterPath);
+    writeJsonArtifact(reviewerJudgementPath, review);
+    emitArtifact(story.id, ARTIFACTS.reviewerJudgement, reviewerJudgementPath);
+    const mustFix = review.issues.filter((i) => i.severity === "must_fix");
+    log(`reviewer: ${review.verdict} (${mustFix.length} must_fix, ${review.issues.length - mustFix.length} nice_to_have)`);
+    events.emit({
+      type: "phase_finished",
+      storyId: story.id,
+      phase: "reviewer",
+      ok: review.verdict === "approve",
+      detail: `${review.verdict} (${mustFix.length} must_fix)`,
+      iteration: iter,
+    });
+    for (const m of mustFix) log(`        ${m.category} ${m.file}${m.line ? `:${m.line}` : ""} — ${m.problem}`);
+    lastReview = review;
+    if (review.verdict === "approve") break;
+    if (iter === maxIter) {
+      log(`WARN  ${story.id}: reviewer still requesting changes after ${maxIter} iterations — proceeding (lenient)`);
+      break;
+    }
+  }
+
+  if (workerFailed) {
+    checkout(stagingBranch, storyCwd);
+    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
+    log(`FAIL  ${story.id}: ${ss.failure_reason}`);
+    ss.ended_at = new Date().toISOString();
+    events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
+    persist();
+    return;
+  }
+
+  // 4. Run test command
+  log(`verify: ${story.test_command ?? testCommand}`);
+  events.emit({ type: "phase_started", storyId: story.id, phase: "verify", detail: story.test_command ?? testCommand });
+  const t = runTestCommand(story.test_command ?? testCommand, storyCwd);
+  const testOutputPath = paths.artifact(story.id, ARTIFACTS.testCommandOutput);
+  writeArtifact(testOutputPath, t.output);
+  emitArtifact(story.id, ARTIFACTS.testCommandOutput, testOutputPath);
+  events.emit({ type: "test_output", storyId: story.id, phase: "verify", ok: t.ok, tail: t.output.split("\n").slice(-80).join("\n") });
+  events.emit({ type: "phase_finished", storyId: story.id, phase: "verify", ok: t.ok, detail: t.ok ? "tests passed" : "tests failed" });
+  if (!t.ok) {
+    ss.status = "failed";
+    ss.failure_reason = `test_command failed:\n${t.output.slice(-1500)}`;
+    checkout(stagingBranch, storyCwd);
+    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
+    log(`FAIL  ${story.id}: tests`);
+    ss.ended_at = new Date().toISOString();
+    events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
+    persist();
+    return;
+  }
+
+  // 5. Generate qa-script with diff visibility, then run it
+  log(`qa-script: drafting (diff-aware)`);
+  events.emit({ type: "phase_started", storyId: story.id, phase: "qa-script", detail: "drafting acceptance script" });
+  const qa = await runPi(
+    qaScriptPrompt(story, workerDiff),
+    storyCwd,
+    sprint.qa_model,
+    (line) => {
+      if (line.trim()) events.emit({ type: "pi_stdout", storyId: story.id, phase: "qa-script", line });
+    },
+    undefined,
+    (line) => {
+      if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "qa-script", line });
+    },
+  );
+  if (qa.exitCode !== 0 || !qa.stdout.trim()) {
+    ss.status = "failed";
+    ss.failure_reason = `qa-script author failed (exit ${qa.exitCode})\n${qa.stderr.slice(0, 500)}`;
+    events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: false, detail: ss.failure_reason });
+    checkout(stagingBranch, storyCwd);
+    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
+    log(`FAIL  ${story.id}: ${ss.failure_reason}`);
+    ss.ended_at = new Date().toISOString();
+    events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
+    persist();
+    return;
+  }
+  writeFileSync(acceptPath, qa.stdout);
+  chmodSync(acceptPath, 0o755);
+  const qaScriptPath = paths.artifact(story.id, ARTIFACTS.qaScript);
+  writeArtifact(qaScriptPath, qa.stdout);
+  emitArtifact(story.id, ARTIFACTS.qaScript, qaScriptPath);
+  events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: true, detail: acceptPath });
+
+  log(`accept: ${acceptPath}`);
+  events.emit({ type: "phase_started", storyId: story.id, phase: "acceptance", detail: acceptPath });
+  const a = runTestCommand(`bash ${acceptPath}`, storyCwd);
+  const qaOutputPath = paths.artifact(story.id, ARTIFACTS.qaScriptOutput);
+  writeArtifact(qaOutputPath, a.output);
+  emitArtifact(story.id, ARTIFACTS.qaScriptOutput, qaOutputPath);
+  events.emit({ type: "test_output", storyId: story.id, phase: "acceptance", ok: a.ok, tail: a.output.split("\n").slice(-80).join("\n") });
+  events.emit({ type: "phase_finished", storyId: story.id, phase: "acceptance", ok: a.ok, detail: a.ok ? "acceptance passed" : "acceptance failed" });
+  if (!a.ok) {
+    ss.status = "failed";
+    ss.failure_reason = `acceptance failed:\n${a.output.slice(-1500)}`;
+    checkout(stagingBranch, storyCwd);
+    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
+    log(`FAIL  ${story.id}: acceptance`);
+    ss.ended_at = new Date().toISOString();
+    events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
+    persist();
+    return;
+  }
+
+  // 5b. Scenario-judge (lenient: warn but don't block)
+  const scenarios = scenariosForStory(sprint.feature_path, story.id, story.feature_story_id);
+  if (scenarios.length > 0) {
+    log(`judge: ${scenarios.length} scenarios via 3-judge majority`);
+    events.emit({ type: "phase_started", storyId: story.id, phase: "scenario-judge", detail: `${scenarios.length} scenarios` });
+    const diff = diffBetween(stagingBranch, featureBranch, storyCwd);
+    const judgement = await judgeScenarios(story, scenarios, diff, t.output, storyCwd, sprint.judge_model);
+    const scenarioJudgementPath = paths.artifact(story.id, ARTIFACTS.scenarioJudgement);
+    writeJsonArtifact(scenarioJudgementPath, judgement);
+    emitArtifact(story.id, ARTIFACTS.scenarioJudgement, scenarioJudgementPath);
+    const failed = judgement.consensus.filter((c) => c.verdict === "fail");
+    const inconclusive = judgement.consensus.filter((c) => c.verdict === "inconclusive");
+    if (failed.length > 0) {
+      log(`WARN  ${story.id}: scenario-judge fail (${failed.length}/${scenarios.length}) — proceeding (lenient)`);
+      for (const f of failed) log(`        ${f.id}: ${f.gaps[0] ?? "no gap reported"}`);
+    } else if (inconclusive.length > 0) {
+      log(`WARN  ${story.id}: scenario-judge inconclusive (${inconclusive.length}/${scenarios.length})`);
+    } else {
+      log(`PASS  ${story.id}: scenarios pass`);
+    }
+    events.emit({ type: "phase_finished", storyId: story.id, phase: "scenario-judge", ok: judgement.overall !== "fail", detail: judgement.overall });
+  } else if (sprint.feature_path) {
+    log(`judge: no scenarios found for ${story.id} in ${sprint.feature_path}`);
+  }
+
+  // 6. Merge feature → staging
+  events.emit({ type: "phase_started", storyId: story.id, phase: "merge", detail: `${featureBranch} → ${stagingBranch}` });
+  mergeNoFf(featureBranch, stagingBranch, `merge: ${story.id} ${story.title}`, storyCwd);
+  events.emit({ type: "git", action: "merge", fromBranch: featureBranch, intoBranch: stagingBranch, message: `merge: ${story.id} ${story.title}` });
+  events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: true, detail: stagingBranch });
+  ss.status = "merged";
+  ss.ended_at = new Date().toISOString();
+  log(`PASS  ${story.id} merged → ${stagingBranch}`);
+  events.emit({ type: "story_finished", storyId: story.id, status: ss.status });
+  persist();
+};
+
+export interface RunSprintOptions {
+  repoCwd: string;
+  /** When set, this run is scoped to a single story (its deps already cleared by the caller). */
+  onlyStory?: string;
+  /** Full story universe for state init. Defaults to sprint.stories; pass the unfiltered list for --story runs. */
+  allStories?: Story[];
+  tmuxUi?: boolean;
+  /** Original sprint file path, recorded in the run_started event. Optional for board/daemon callers. */
+  sprintPath?: string;
+}
+
+/**
+ * Run a whole sprint: derive per-run context, init/resume state, then run each
+ * story (in dependency order) via runStory, and tear down. Returns the final
+ * SprintState. Pure callable — does not read argv or call process.exit — so the
+ * board watcher and daemon can drive it directly.
+ */
+export const runSprint = async (sprint: Sprint, opts: RunSprintOptions): Promise<SprintState> => {
+  const { repoCwd, onlyStory, tmuxUi = false } = opts;
+  const baseBranch = sprint.base_branch ?? "main";
+  const runId = sprint.staging_branch ? branchRunId(sprint.staging_branch) : `${Date.now()}`;
+  const stagingBranch = sprint.staging_branch ?? `pi-team-lean/${runId}/staging`;
+  const testCommand = sprint.test_command ?? "npm test";
+  const stateDir = join(repoCwd, ".pi-team-lean");
+  const acceptDir = join(stateDir, "acceptance");
+  const legacyStatePath = join(stateDir, "sprint-state.json");
+  const paths = runPaths(repoCwd, runId);
+  const statePath = paths.state;
+  const events = createEventWriter(paths.events);
+  const emitArtifact = (storyId: string, name: string, path: string): void =>
+    events.emit({ type: "artifact_written", storyId, name, path });
+
+  const storyCwds = Array.from(new Set(sprint.stories.map((story) => resolveStoryCwd(repoCwd, story))));
+  if (storyCwds.includes(repoCwd)) ensureCleanTree(repoCwd);
+  for (const storyCwd of storyCwds) {
+    if (storyCwd !== repoCwd) ensureCleanTree(storyCwd);
+  }
+  mkdirSync(acceptDir, { recursive: true });
+  mkdirSync(paths.root, { recursive: true });
+  events.emit({
+    type: "run_started",
+    runId,
+    cwd: repoCwd,
+    sprintPath: opts.sprintPath ? resolve(opts.sprintPath) : "",
+    baseBranch,
+    stagingBranch,
+    storyCount: sprint.stories.length,
+  });
+  log(`Repo: ${repoCwd}`);
+  events.emit({ type: "log", message: `Repo: ${repoCwd}` });
+  log(`Base: ${baseBranch}  Staging: ${stagingBranch}`);
+  events.emit({ type: "log", message: `Base: ${baseBranch}  Staging: ${stagingBranch}` });
+
+  const stateUniverse = opts.allStories ?? sprint.stories;
+  const state: SprintState = mergeSprintState(
+    readSprintState(statePath) ?? readSprintState(legacyStatePath) ?? initialSprintState(stateUniverse, baseBranch, stagingBranch),
+    stateUniverse,
+  );
+  const persist = (): void => {
+    writeFileSync(statePath, JSON.stringify(state, null, 2));
+    writeFileSync(legacyStatePath, JSON.stringify(state, null, 2));
+    events.emit({ type: "state_written", path: statePath });
+    for (const [sid, ss] of Object.entries(state.stories)) {
+      if (ss.status === "pending") continue;
+      writeJsonArtifact(paths.artifact(sid, ARTIFACTS.meta), { id: sid, ...ss });
+    }
+  };
+  persist();
+  if (tmuxUi) openTmuxWatcher(repoCwd, runId);
+
+  const ctx: RunContext = {
+    sprint,
+    repoCwd,
+    baseBranch,
+    stagingBranch,
+    runId,
+    testCommand,
+    acceptDir,
+    paths,
+    events,
+    state,
+    persist,
+    emitArtifact,
+  };
+
+  const ordered = topoSort(sprint.stories);
+  for (const story of ordered) {
+    await runStory(story, ctx);
+  }
+
+  state.ended_at = new Date().toISOString();
+  persist();
+  for (const storyCwd of storyCwds) {
+    if (branchExists(stagingBranch, storyCwd)) {
+      checkout(stagingBranch, storyCwd);
+      events.emit({ type: "git", action: "checkout", branch: stagingBranch });
+    }
+  }
+
+  const summary = Object.entries(state.stories).map(([id, s]) => `  ${s.status.padEnd(10)} ${id}`);
+  events.emit({
+    type: "run_finished",
+    runId,
+    stagingBranch,
+    summary: Object.entries(state.stories).map(([id, s]) => ({ id, status: s.status })),
+  });
+  log(`\nSprint complete on ${stagingBranch}\n${summary.join("\n")}`);
+  log(`State: ${statePath}`);
+  events.emit({ type: "log", message: `State: ${statePath}` });
+  return state;
+};
+
 const main = async (): Promise<void> => {
   if (process.argv[2] === "check") {
     process.exit(cliPreflight(process.argv.slice(3)));
@@ -176,336 +572,17 @@ const main = async (): Promise<void> => {
     sprint.stories = [{ ...filtered[0]!, depends_on: [] }];
     console.log(`[pi-team-lean] Filtered to single story: ${onlyStory} (dependencies cleared)`);
   }
-  const baseBranch = sprint.base_branch ?? "main";
-  const runId = sprint.staging_branch ? branchRunId(sprint.staging_branch) : `${Date.now()}`;
-  const stagingBranch = sprint.staging_branch ?? `pi-team-lean/${runId}/staging`;
-  const testCommand = sprint.test_command ?? "npm test";
-  const stateDir = join(repoCwd, ".pi-team-lean");
-  const acceptDir = join(stateDir, "acceptance");
-  const legacyStatePath = join(stateDir, "sprint-state.json");
-  const paths = runPaths(repoCwd, runId);
-  const statePath = paths.state;
-  const events = createEventWriter(paths.events);
-  const emitArtifact = (storyId: string, name: string, path: string): void =>
-    events.emit({ type: "artifact_written", storyId, name, path });
-
-  const storyCwds = Array.from(new Set(sprint.stories.map((story) => resolveStoryCwd(repoCwd, story))));
-  if (storyCwds.includes(repoCwd)) ensureCleanTree(repoCwd);
-  for (const storyCwd of storyCwds) {
-    if (storyCwd !== repoCwd) ensureCleanTree(storyCwd);
+  if (envTmuxUi && onlyStory && !explicitTmuxUi) {
+    log("Skipping auto tmux watcher for --story run; existing sprint dashboard should keep showing the full run");
   }
-  mkdirSync(acceptDir, { recursive: true });
-  mkdirSync(paths.root, { recursive: true });
-  events.emit({
-    type: "run_started",
-    runId,
-    cwd: repoCwd,
-    sprintPath: resolve(sprintPath),
-    baseBranch,
-    stagingBranch,
-    storyCount: sprint.stories.length,
+
+  await runSprint(sprint, {
+    repoCwd,
+    onlyStory,
+    allStories: onlyStory ? allSprintStories : undefined,
+    tmuxUi,
+    sprintPath,
   });
-  if (envTmuxUi && onlyStory && !explicitTmuxUi) log("Skipping auto tmux watcher for --story run; existing sprint dashboard should keep showing the full run");
-  log(`Repo: ${repoCwd}`);
-  events.emit({ type: "log", message: `Repo: ${repoCwd}` });
-  log(`Base: ${baseBranch}  Staging: ${stagingBranch}`);
-  events.emit({ type: "log", message: `Base: ${baseBranch}  Staging: ${stagingBranch}` });
-
-  const stateUniverse = onlyStory ? allSprintStories : sprint.stories;
-  const state: SprintState = mergeSprintState(
-    readSprintState(statePath) ?? readSprintState(legacyStatePath) ?? initialSprintState(stateUniverse, baseBranch, stagingBranch),
-    stateUniverse,
-  );
-  const persist = (): void => {
-    writeFileSync(statePath, JSON.stringify(state, null, 2));
-    writeFileSync(legacyStatePath, JSON.stringify(state, null, 2));
-    events.emit({ type: "state_written", path: statePath });
-    for (const [sid, ss] of Object.entries(state.stories)) {
-      if (ss.status === "pending") continue;
-      writeJsonArtifact(paths.artifact(sid, ARTIFACTS.meta), { id: sid, ...ss });
-    }
-  };
-  persist();
-  if (tmuxUi) openTmuxWatcher(repoCwd, runId);
-
-  const ordered = topoSort(sprint.stories);
-
-  for (const story of ordered) {
-    const ss = state.stories[story.id]!;
-    const blockers = (story.depends_on ?? []).filter((d) => state.stories[d]?.status !== "merged");
-    if (blockers.length > 0) {
-      ss.status = "skipped";
-      ss.failure_reason = `blocked by ${blockers.join(", ")}`;
-      log(`SKIP  ${story.id}: ${ss.failure_reason}`);
-      events.emit({ type: "story_skipped", storyId: story.id, reason: ss.failure_reason });
-      persist();
-      continue;
-    }
-
-    ss.status = "in_progress";
-    ss.started_at = new Date().toISOString();
-    ss.repo_path = story.repo_path ?? ".";
-    persist();
-    log(`---- ${story.id}: ${story.title} ----`);
-    events.emit({ type: "story_started", storyId: story.id, title: story.title });
-
-    paths.storyDir(story.id);
-    const acceptPath = join(acceptDir, `${story.id}.sh`);
-    const storyCwd = resolveStoryCwd(repoCwd, story);
-    const storyBaseBranch = story.base_branch ?? baseBranch;
-    ensureStagingBranch(stagingBranch, storyBaseBranch, storyCwd, events);
-
-    // 1. Cut feature branch from staging, run worker (worker does NOT see acceptance criteria)
-    const featureBranch = `pi-team-lean/${runId}/story-${story.id}`;
-    events.emit({ type: "phase_started", storyId: story.id, phase: "staging", detail: `cut ${featureBranch}` });
-    cutBranch(featureBranch, stagingBranch, storyCwd);
-    events.emit({ type: "git", action: "cut_branch", branch: featureBranch, fromBranch: stagingBranch });
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "staging", ok: true, detail: featureBranch });
-    ss.branch = featureBranch;
-    persist();
-
-    const maxIter = sprint.enable_reviewer ? Math.max(1, sprint.max_review_iterations ?? 2) : 1;
-    let workerDiff = "";
-    let lastReview: ReviewResult | undefined;
-    let workerFailed = false;
-
-    for (let iter = 1; iter <= maxIter; iter++) {
-      const feedback = lastReview ? reviewerFeedbackForWorker(lastReview) : "";
-      const timeoutMin = story.worker_timeout_min ?? sprint.worker_timeout_min ?? DEFAULT_WORKER_TIMEOUT_MIN;
-      const timeoutMs = timeoutMin * 60 * 1000;
-      log(`worker: implementing on ${featureBranch} (iter ${iter}/${maxIter}${feedback ? ", with review feedback" : ""}, timeout ${timeoutMin}m)`);
-      events.emit({
-        type: "phase_started",
-        storyId: story.id,
-        phase: "worker",
-        iteration: iter,
-        totalIterations: maxIter,
-        detail: `${featureBranch}, timeout ${timeoutMin}m`,
-      });
-      const w = await runPi(
-        workerPrompt(story, "", story.test_command ?? testCommand, feedback),
-        storyCwd,
-        sprint.worker_model,
-        (line) => {
-          if (line.trim()) {
-            console.log(`  pi> ${line}`);
-            events.emit({ type: "pi_stdout", storyId: story.id, phase: "worker", line, iteration: iter });
-          }
-        },
-        { timeoutMs },
-        (line) => {
-          if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "worker", line, iteration: iter });
-        },
-      );
-      const workerIterStdout = paths.artifact(story.id, `worker.iter${iter}.stdout.log`);
-      const workerIterStderr = paths.artifact(story.id, `worker.iter${iter}.stderr.log`);
-      const workerStdout = paths.artifact(story.id, ARTIFACTS.workerStdout);
-      const workerStderr = paths.artifact(story.id, ARTIFACTS.workerStderr);
-      writeArtifact(workerIterStdout, w.stdout);
-      emitArtifact(story.id, `worker.iter${iter}.stdout.log`, workerIterStdout);
-      writeArtifact(workerIterStderr, w.stderr);
-      emitArtifact(story.id, `worker.iter${iter}.stderr.log`, workerIterStderr);
-      writeArtifact(workerStdout, w.stdout);
-      emitArtifact(story.id, ARTIFACTS.workerStdout, workerStdout);
-      writeArtifact(workerStderr, w.stderr);
-      emitArtifact(story.id, ARTIFACTS.workerStderr, workerStderr);
-
-      if (w.exitCode !== 0) {
-        ss.status = "failed";
-        const reason = w.timedOut ? `worker timed out after ${timeoutMin}m (iter ${iter})` : `worker exit ${w.exitCode} (iter ${iter})`;
-        ss.failure_reason = `${reason}\n${w.stderr.slice(0, 500)}`;
-        events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: reason, iteration: iter });
-        workerFailed = true;
-        break;
-      }
-
-      const commitsSoFar = commitsOnBranch(featureBranch, stagingBranch, storyCwd);
-      if (commitsSoFar.length === 0) {
-        ss.status = "failed";
-        ss.failure_reason = `worker exited but made no commits (iter ${iter})`;
-        events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: ss.failure_reason, iteration: iter });
-        workerFailed = true;
-        break;
-      }
-      ss.commits = commitsSoFar;
-      workerDiff = diffBetween(stagingBranch, featureBranch, storyCwd);
-      const workerDiffPath = paths.artifact(story.id, ARTIFACTS.workerDiff);
-      writeArtifact(workerDiffPath, workerDiff);
-      emitArtifact(story.id, ARTIFACTS.workerDiff, workerDiffPath);
-      events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: true, detail: `${commitsSoFar.length} commit(s)`, iteration: iter });
-      persist();
-
-      if (!sprint.enable_reviewer) break;
-
-      log(`reviewer: pass ${iter}/${maxIter}`);
-      events.emit({ type: "phase_started", storyId: story.id, phase: "reviewer", iteration: iter, totalIterations: maxIter });
-      const review = await runReview(story, workerDiff, storyCwd, sprint.reviewer_model, lastReview);
-      const reviewerIterPath = paths.artifact(story.id, `reviewer.iter${iter}.json`);
-      const reviewerJudgementPath = paths.artifact(story.id, ARTIFACTS.reviewerJudgement);
-      writeJsonArtifact(reviewerIterPath, review);
-      emitArtifact(story.id, `reviewer.iter${iter}.json`, reviewerIterPath);
-      writeJsonArtifact(reviewerJudgementPath, review);
-      emitArtifact(story.id, ARTIFACTS.reviewerJudgement, reviewerJudgementPath);
-      const mustFix = review.issues.filter((i) => i.severity === "must_fix");
-      log(`reviewer: ${review.verdict} (${mustFix.length} must_fix, ${review.issues.length - mustFix.length} nice_to_have)`);
-      events.emit({
-        type: "phase_finished",
-        storyId: story.id,
-        phase: "reviewer",
-        ok: review.verdict === "approve",
-        detail: `${review.verdict} (${mustFix.length} must_fix)`,
-        iteration: iter,
-      });
-      for (const m of mustFix) log(`        ${m.category} ${m.file}${m.line ? `:${m.line}` : ""} — ${m.problem}`);
-      lastReview = review;
-      if (review.verdict === "approve") break;
-      if (iter === maxIter) {
-        log(`WARN  ${story.id}: reviewer still requesting changes after ${maxIter} iterations — proceeding (lenient)`);
-        break;
-      }
-    }
-
-    if (workerFailed) {
-      checkout(stagingBranch, storyCwd);
-      events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-      log(`FAIL  ${story.id}: ${ss.failure_reason}`);
-      ss.ended_at = new Date().toISOString();
-      events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
-      persist();
-      continue;
-    }
-
-    // 4. Run test command
-    log(`verify: ${story.test_command ?? testCommand}`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "verify", detail: story.test_command ?? testCommand });
-    const t = runTestCommand(story.test_command ?? testCommand, storyCwd);
-    const testOutputPath = paths.artifact(story.id, ARTIFACTS.testCommandOutput);
-    writeArtifact(testOutputPath, t.output);
-    emitArtifact(story.id, ARTIFACTS.testCommandOutput, testOutputPath);
-    events.emit({ type: "test_output", storyId: story.id, phase: "verify", ok: t.ok, tail: t.output.split("\n").slice(-80).join("\n") });
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "verify", ok: t.ok, detail: t.ok ? "tests passed" : "tests failed" });
-    if (!t.ok) {
-      ss.status = "failed";
-      ss.failure_reason = `test_command failed:\n${t.output.slice(-1500)}`;
-      checkout(stagingBranch, storyCwd);
-      events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-      log(`FAIL  ${story.id}: tests`);
-      ss.ended_at = new Date().toISOString();
-      events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
-      persist();
-      continue;
-    }
-
-    // 5. Generate qa-script with diff visibility, then run it
-    log(`qa-script: drafting (diff-aware)`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "qa-script", detail: "drafting acceptance script" });
-    const qa = await runPi(
-      qaScriptPrompt(story, workerDiff),
-      storyCwd,
-      sprint.qa_model,
-      (line) => {
-        if (line.trim()) events.emit({ type: "pi_stdout", storyId: story.id, phase: "qa-script", line });
-      },
-      undefined,
-      (line) => {
-        if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "qa-script", line });
-      },
-    );
-    if (qa.exitCode !== 0 || !qa.stdout.trim()) {
-      ss.status = "failed";
-      ss.failure_reason = `qa-script author failed (exit ${qa.exitCode})\n${qa.stderr.slice(0, 500)}`;
-      events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: false, detail: ss.failure_reason });
-      checkout(stagingBranch, storyCwd);
-      events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-      log(`FAIL  ${story.id}: ${ss.failure_reason}`);
-      ss.ended_at = new Date().toISOString();
-      events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
-      persist();
-      continue;
-    }
-    writeFileSync(acceptPath, qa.stdout);
-    chmodSync(acceptPath, 0o755);
-    const qaScriptPath = paths.artifact(story.id, ARTIFACTS.qaScript);
-    writeArtifact(qaScriptPath, qa.stdout);
-    emitArtifact(story.id, ARTIFACTS.qaScript, qaScriptPath);
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: true, detail: acceptPath });
-
-    log(`accept: ${acceptPath}`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "acceptance", detail: acceptPath });
-    const a = runTestCommand(`bash ${acceptPath}`, storyCwd);
-    const qaOutputPath = paths.artifact(story.id, ARTIFACTS.qaScriptOutput);
-    writeArtifact(qaOutputPath, a.output);
-    emitArtifact(story.id, ARTIFACTS.qaScriptOutput, qaOutputPath);
-    events.emit({ type: "test_output", storyId: story.id, phase: "acceptance", ok: a.ok, tail: a.output.split("\n").slice(-80).join("\n") });
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "acceptance", ok: a.ok, detail: a.ok ? "acceptance passed" : "acceptance failed" });
-    if (!a.ok) {
-      ss.status = "failed";
-      ss.failure_reason = `acceptance failed:\n${a.output.slice(-1500)}`;
-      checkout(stagingBranch, storyCwd);
-      events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-      log(`FAIL  ${story.id}: acceptance`);
-      ss.ended_at = new Date().toISOString();
-      events.emit({ type: "story_finished", storyId: story.id, status: ss.status, failureReason: ss.failure_reason });
-      persist();
-      continue;
-    }
-
-    // 5b. Scenario-judge (lenient: warn but don't block)
-    const scenarios = scenariosForStory(sprint.feature_path, story.id, story.feature_story_id);
-    if (scenarios.length > 0) {
-      log(`judge: ${scenarios.length} scenarios via 3-judge majority`);
-      events.emit({ type: "phase_started", storyId: story.id, phase: "scenario-judge", detail: `${scenarios.length} scenarios` });
-      const diff = diffBetween(stagingBranch, featureBranch, storyCwd);
-      const judgement = await judgeScenarios(story, scenarios, diff, t.output, storyCwd, sprint.judge_model);
-      const scenarioJudgementPath = paths.artifact(story.id, ARTIFACTS.scenarioJudgement);
-      writeJsonArtifact(scenarioJudgementPath, judgement);
-      emitArtifact(story.id, ARTIFACTS.scenarioJudgement, scenarioJudgementPath);
-      const failed = judgement.consensus.filter((c) => c.verdict === "fail");
-      const inconclusive = judgement.consensus.filter((c) => c.verdict === "inconclusive");
-      if (failed.length > 0) {
-        log(`WARN  ${story.id}: scenario-judge fail (${failed.length}/${scenarios.length}) — proceeding (lenient)`);
-        for (const f of failed) log(`        ${f.id}: ${f.gaps[0] ?? "no gap reported"}`);
-      } else if (inconclusive.length > 0) {
-        log(`WARN  ${story.id}: scenario-judge inconclusive (${inconclusive.length}/${scenarios.length})`);
-      } else {
-        log(`PASS  ${story.id}: scenarios pass`);
-      }
-      events.emit({ type: "phase_finished", storyId: story.id, phase: "scenario-judge", ok: judgement.overall !== "fail", detail: judgement.overall });
-    } else if (sprint.feature_path) {
-      log(`judge: no scenarios found for ${story.id} in ${sprint.feature_path}`);
-    }
-
-    // 6. Merge feature → staging
-    events.emit({ type: "phase_started", storyId: story.id, phase: "merge", detail: `${featureBranch} → ${stagingBranch}` });
-    mergeNoFf(featureBranch, stagingBranch, `merge: ${story.id} ${story.title}`, storyCwd);
-    events.emit({ type: "git", action: "merge", fromBranch: featureBranch, intoBranch: stagingBranch, message: `merge: ${story.id} ${story.title}` });
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: true, detail: stagingBranch });
-    ss.status = "merged";
-    ss.ended_at = new Date().toISOString();
-    log(`PASS  ${story.id} merged → ${stagingBranch}`);
-    events.emit({ type: "story_finished", storyId: story.id, status: ss.status });
-    persist();
-  }
-
-  state.ended_at = new Date().toISOString();
-  persist();
-  for (const storyCwd of storyCwds) {
-    if (branchExists(stagingBranch, storyCwd)) {
-      checkout(stagingBranch, storyCwd);
-      events.emit({ type: "git", action: "checkout", branch: stagingBranch });
-    }
-  }
-
-  const summary = Object.entries(state.stories).map(([id, s]) => `  ${s.status.padEnd(10)} ${id}`);
-  events.emit({
-    type: "run_finished",
-    runId,
-    stagingBranch,
-    summary: Object.entries(state.stories).map(([id, s]) => ({ id, status: s.status })),
-  });
-  log(`\nSprint complete on ${stagingBranch}\n${summary.join("\n")}`);
-  log(`State: ${statePath}`);
-  events.emit({ type: "log", message: `State: ${statePath}` });
 };
 
 main().catch((e: Error) => {
