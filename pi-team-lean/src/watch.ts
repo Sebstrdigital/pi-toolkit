@@ -102,6 +102,7 @@ const formatTokenCount = (tokens: number): string => {
 const statusIcon = (status: StoryStatus): string => {
   if (status === "merged") return color.green("✓");
   if (status === "failed") return color.red("✗");
+  if (status === "needs_human") return color.magenta("⏸");
   if (status === "skipped") return color.yellow("↷");
   if (status === "in_progress") return color.cyan("▶");
   return color.dim("○");
@@ -110,6 +111,7 @@ const statusIcon = (status: StoryStatus): string => {
 const statusText = (status: StoryStatus): string => {
   if (status === "merged") return color.green(status);
   if (status === "failed") return color.red(status);
+  if (status === "needs_human") return color.magenta(status);
   if (status === "skipped") return color.yellow(status);
   if (status === "in_progress") return color.cyan(status);
   return color.dim(status);
