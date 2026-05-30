@@ -441,12 +441,19 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     events.emit({ type: "test_output", storyId: story.id, phase: "acceptance", ok: a.ok, tail: a.output.split("\n").slice(-80).join("\n") });
     events.emit({ type: "phase_finished", storyId: story.id, phase: "acceptance", ok: a.ok, detail: a.ok ? "acceptance passed" : "acceptance failed" });
     if (!a.ok) {
-      if (retry.acceptance && iter < maxIter) {
+      if (sprint.acceptance_advisory) {
+        // Advisory: per-story code-level acceptance is the wrong altitude (see
+        // dua-factory docs/QA-AUTHOR.md). Warn and proceed — like scenario-judge —
+        // rather than feeding back or parking. Real behavioural acceptance lives at
+        // the feature boundary (B2). verify + reviewer remain the blocking gates.
+        log(`WARN  ${story.id}: acceptance failed (advisory) — proceeding`);
+      } else if (retry.acceptance && iter < maxIter) {
         feedback = acceptanceFailureFeedback(a.output);
         noteRetry("acceptance", iter);
         continue;
+      } else {
+        return endStory(retry.acceptance ? "needs_human" : "failed", `acceptance failed after ${iter} iteration(s):\n${a.output.slice(-1500)}`);
       }
-      return endStory(retry.acceptance ? "needs_human" : "failed", `acceptance failed after ${iter} iteration(s):\n${a.output.slice(-1500)}`);
     }
 
     // 5. Scenario-judge (lenient: warn but don't block)
