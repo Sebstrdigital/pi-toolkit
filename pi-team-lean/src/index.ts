@@ -245,8 +245,17 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
   const endStory = (status: StoryStatus, reason: string): void => {
     ss.status = status;
     ss.failure_reason = reason;
-    checkout(stagingBranch, storyCwd);
-    events.emit({ type: "git", action: "checkout", branch: stagingBranch });
+    // Guard the teardown checkout: a failure here (dirty tree, conflict, a
+    // committed .pi-team-lean/, etc.) must not throw out of runStory and abort
+    // the WHOLE sprint — this story is already terminal; just continue.
+    try {
+      checkout(stagingBranch, storyCwd);
+      events.emit({ type: "git", action: "checkout", branch: stagingBranch });
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      log(`WARN  ${story.id}: could not restore ${stagingBranch} (${m.split("\n")[0]}); continuing`);
+      events.emit({ type: "log", message: `endStory checkout failed for ${story.id}: ${m}` });
+    }
     log(`${status === "needs_human" ? "PARK" : "FAIL"}  ${story.id}: ${reason.split("\n")[0]}`);
     ss.ended_at = new Date().toISOString();
     events.emit({ type: "story_finished", storyId: story.id, status, failureReason: reason });
