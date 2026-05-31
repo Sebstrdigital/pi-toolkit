@@ -201,6 +201,15 @@ export interface RunContext {
 export const runStory = async (story: Story, ctx: RunContext): Promise<void> => {
   const { sprint, baseBranch, stagingBranch, runId, testCommand, acceptDir, paths, events, state, persist, emitArtifact } = ctx;
   const ss = state.stories[story.id]!;
+  // Resume guard: a story already merged in a prior run is done. Re-running it
+  // would `git checkout -b` an existing feature branch and FATAL ("already
+  // exists"), aborting the resume. Skip it idempotently — its terminal state is
+  // already recorded. (Surfaced by the 2026-05-31 nettobrand shakedown: a resume
+  // after a post-merge board-write failure re-cut the merged story's branch.)
+  if (ss.status === "merged") {
+    log(`SKIP  ${story.id}: already merged`);
+    return;
+  }
   const blockers = (story.depends_on ?? []).filter((d) => state.stories[d]?.status !== "merged");
   if (blockers.length > 0) {
     ss.status = "skipped";
