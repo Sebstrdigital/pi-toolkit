@@ -529,7 +529,6 @@ export const runSprint = async (sprint: Sprint, opts: RunSprintOptions): Promise
   const testCommand = sprint.test_command ?? "npm test";
   const stateDir = join(repoCwd, ".pi-team-lean");
   const acceptDir = join(stateDir, "acceptance");
-  const legacyStatePath = join(stateDir, "sprint-state.json");
   const paths = runPaths(repoCwd, runId);
   const statePath = paths.state;
   const events = createEventWriter(paths.events);
@@ -558,13 +557,16 @@ export const runSprint = async (sprint: Sprint, opts: RunSprintOptions): Promise
   events.emit({ type: "log", message: `Base: ${baseBranch}  Staging: ${stagingBranch}` });
 
   const stateUniverse = opts.allStories ?? sprint.stories;
+  // State is strictly per-run (runs/<runId>/sprint-state.json). NO shared-root
+  // fallback: a previous run's state must never seed a different run (that caused
+  // cross-card contamination → false needs_human parks). runId is deterministic
+  // (branchRunId(staging_branch)), so a resume always finds its own per-run file.
   const state: SprintState = mergeSprintState(
-    readSprintState(statePath) ?? readSprintState(legacyStatePath) ?? initialSprintState(stateUniverse, baseBranch, stagingBranch),
+    readSprintState(statePath) ?? initialSprintState(stateUniverse, baseBranch, stagingBranch),
     stateUniverse,
   );
   const persist = (): void => {
     writeFileSync(statePath, JSON.stringify(state, null, 2));
-    writeFileSync(legacyStatePath, JSON.stringify(state, null, 2));
     events.emit({ type: "state_written", path: statePath });
     for (const [sid, ss] of Object.entries(state.stories)) {
       if (ss.status === "pending") continue;

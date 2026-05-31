@@ -162,10 +162,9 @@ const readJsonState = (path: string): SprintState | undefined => {
 };
 
 const statePath = (repoCwd: string, runId: string): string => join(repoCwd, ".pi-team-lean", "runs", runId, "sprint-state.json");
-const legacyStatePath = (repoCwd: string): string => join(repoCwd, ".pi-team-lean", "sprint-state.json");
 
 const readState = (repoCwd: string, runId: string): SprintState | undefined =>
-  readJsonState(statePath(repoCwd, runId)) ?? readJsonState(legacyStatePath(repoCwd));
+  readJsonState(statePath(repoCwd, runId));
 
 const eventLabel = (e: TeamLeanEvent): string => {
   const time = e.timestamp.slice(11, 19);
@@ -259,11 +258,9 @@ export const runWatch = (argv: string[]): number => {
   rerender();
   const interval = setInterval(rerender, 1000);
   const runStatePath = statePath(repoCwd, runId);
-  const rootStatePath = legacyStatePath(repoCwd);
   const watchers = [
     existsSync(logPath) ? watch(logPath, rerender) : undefined,
     existsSync(runStatePath) ? watch(runStatePath, rerender) : undefined,
-    existsSync(rootStatePath) ? watch(rootStatePath, rerender) : undefined,
   ].filter(Boolean) as Array<{ close(): void }>;
 
   if (process.stdin.isTTY) {
