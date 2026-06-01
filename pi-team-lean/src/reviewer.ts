@@ -1,8 +1,11 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runPi } from "./pi.js";
+import { runPi, DEFAULT_GATE_TIMEOUT_MS } from "./pi.js";
+import { truncateForPrompt } from "./truncate.js";
 import type { Story } from "./types.js";
+
+const REVIEW_DIFF_CAP = 80000;
 
 export interface ReviewIssue {
   severity: "must_fix" | "nice_to_have";
@@ -19,6 +22,17 @@ export interface ReviewResult {
   summary: string;
   raw?: string;
   parse_error?: string;
+  /**
+   * True when this verdict came from a gate-INFRASTRUCTURE failure (crash,
+   * timeout, unparseable output) rather than a genuine review. The gate fails
+   * CLOSED (verdict forced to request_changes) and the caller surfaces a
+   * degraded-gate event instead of silently treating it as a real verdict.
+   */
+  degraded?: boolean;
+  /** Reason the gate was degraded (timeout / exit N / parse_error). */
+  degraded_reason?: string;
+  /** True when the reviewed diff was truncated to fit the prompt budget. */
+  diff_truncated?: boolean;
 }
 
 const skillRoot = (): string => {
@@ -87,12 +101,12 @@ ${story.body}
 # Worker diff to review
 
 \`\`\`diff
-${diff.slice(0, 80000)}
+${truncateForPrompt(diff, REVIEW_DIFF_CAP).text}
 \`\`\`
 ${feedbackHistory ? `\n# Previous review (this is iteration N+1)\n\n${feedbackHistory}\n` : ""}
 Return the JSON object now.`;
 
-const parseReview = (raw: string): ReviewResult => {
+export const parseReview = (raw: string): ReviewResult => {
   try {
     const start = raw.indexOf("{");
     const end = raw.lastIndexOf("}");
@@ -111,12 +125,18 @@ const parseReview = (raw: string): ReviewResult => {
       : [];
     return { verdict, issues, summary: String(obj.summary ?? ""), raw };
   } catch (e: unknown) {
+    // FAIL CLOSED: unparseable reviewer output must not be read as an approve.
+    // The reviewer is the strongest safety gate; a non-JSON response is an
+    // infrastructure failure, so force request_changes and mark it degraded so
+    // the caller surfaces it (reviewer-judge-fail-open).
     return {
-      verdict: "approve",
+      verdict: "request_changes",
       issues: [],
       summary: "",
       raw,
       parse_error: (e as Error).message,
+      degraded: true,
+      degraded_reason: `parse_error: ${(e as Error).message}`,
     };
   }
 };
@@ -127,6 +147,7 @@ export const runReview = async (
   cwd: string,
   model: string | undefined,
   previousReview?: ReviewResult,
+  timeoutMs: number = DEFAULT_GATE_TIMEOUT_MS,
 ): Promise<ReviewResult> => {
   const conventions = loadConventions(cwd);
   const feedbackHistory = previousReview
@@ -135,17 +156,24 @@ export const runReview = async (
         .map((i) => `- ${i.file}:${i.line ?? "?"} (${i.category}) ${i.problem}`)
         .join("\n")}\n\nCheck if these are now resolved in the current diff. Re-flag only if still present.`
     : "";
-  const r = await runPi(reviewerPrompt(story, diff, conventions, feedbackHistory), cwd, model);
+  const diffTruncated = diff.length > REVIEW_DIFF_CAP;
+  const r = await runPi(reviewerPrompt(story, diff, conventions, feedbackHistory), cwd, model, undefined, { timeoutMs });
   if (r.exitCode !== 0) {
+    // FAIL CLOSED on crash/timeout: a non-zero reviewer exit is a degraded gate,
+    // not an approval. Force request_changes so the story cannot silently merge.
+    const reason = r.timedOut ? `reviewer timed out after ${Math.round(timeoutMs / 60000)}m` : `exit ${r.exitCode}`;
     return {
-      verdict: "approve",
+      verdict: "request_changes",
       issues: [],
       summary: "",
       raw: r.stderr,
-      parse_error: `exit ${r.exitCode}`,
+      parse_error: reason,
+      degraded: true,
+      degraded_reason: reason,
+      diff_truncated: diffTruncated,
     };
   }
-  return parseReview(r.stdout);
+  return { ...parseReview(r.stdout), diff_truncated: diffTruncated };
 };
 
 export const reviewerFeedbackForWorker = (review: ReviewResult): string => {

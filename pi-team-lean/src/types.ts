@@ -28,6 +28,14 @@ export interface Sprint {
    * the wrong altitude pending the validation-chain redesign.
    */
   acceptance_advisory?: boolean;
+  /**
+   * When true, skip the post-merge re-verification of the test command on
+   * staging. Default (unset) runs the test command on the merged staging branch
+   * and reverts+parks the story on failure, so a clean textual merge that is a
+   * semantic break never ends a sprint with staging red
+   * (acceptance-validates-premerge-no-postmerge-verify).
+   */
+  skip_postmerge_verify?: boolean;
   /** Deprecated alias for max_iterations (reviewer-only cap); still honored as a fallback. */
   max_review_iterations?: number;
   /** Overall bounded-retry cap for the delivery loop (worker → reviewer → verify → acceptance). Default 3. */
