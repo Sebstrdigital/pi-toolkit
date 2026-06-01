@@ -8,12 +8,17 @@ import {
   cutBranch,
   checkout,
   branchExists,
-  mergeNoFf,
+  tryMergeNoFf,
+  resetToOrigHead,
+  isReachableFrom,
+  deleteBranch,
+  localBranchHeads,
   commitsOnBranch,
-  currentBranch,
   diffBetween,
 } from "./git.js";
-import { runPaths, writeArtifact, writeJsonArtifact, ARTIFACTS } from "./runs.js";
+import { runSandboxed } from "./sandbox.js";
+import { allowListedEnv } from "./env.js";
+import { runPaths, writeArtifact, writeJsonArtifact, writeFileAtomic, ARTIFACTS } from "./runs.js";
 import { createEventWriter } from "./events.js";
 import { runWatch } from "./watch.js";
 import { scenariosForStory } from "./features.js";
@@ -137,6 +142,10 @@ const runTestCommand = (cmd: string, cwd: string): { ok: boolean; output: string
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 10 * 1024 * 1024,
+      // Explicit allow-listed env: the test command is config/LLM-influenced and
+      // must not inherit the operator's full secret-bearing process.env
+      // (qa-script-arbitrary-exec, exfil half).
+      env: allowListedEnv(),
     });
     return { ok: true, output };
   } catch (e: unknown) {
@@ -144,6 +153,32 @@ const runTestCommand = (cmd: string, cwd: string): { ok: boolean; output: string
     const out = (err.stdout?.toString() ?? "") + (err.stderr?.toString() ?? "");
     return { ok: false, output: out };
   }
+};
+
+/** Max accumulated retry-feedback length kept across iterations (cap to avoid unbounded prompt growth). */
+const MAX_FEEDBACK_CHARS = 8000;
+
+/**
+ * Append a new feedback block to the accumulated feedback, newest last, capped.
+ * Previously each phase OVERWROTE `feedback`, so the worker lost the history of
+ * what it had already tried and looped on the same mistake
+ * (feedback-overwrite-not-accumulate).
+ */
+export const accumulateFeedback = (prev: string, next: string, iter: number): string => {
+  const block = `<!-- feedback from iteration ${iter} -->\n${next}`;
+  const combined = prev ? `${prev}\n\n---\n\n${block}` : block;
+  // Keep the tail (most recent) when over budget.
+  return combined.length > MAX_FEEDBACK_CHARS ? combined.slice(-MAX_FEEDBACK_CHARS) : combined;
+};
+
+/**
+ * Stable signature of an attempt's outcome, used by the no-progress guard. Two
+ * consecutive iterations with the same worker diff AND same failure signature
+ * mean the loop is stuck — park instead of burning the remaining budget.
+ */
+export const attemptSignature = (workerDiff: string, failureKind: string, failureOutput: string): string => {
+  const norm = (s: string): string => s.replace(/\s+/g, " ").trim().slice(0, 4000);
+  return `${failureKind}::${norm(failureOutput)}::${norm(workerDiff)}`;
 };
 
 const resolveStoryCwd = (repoCwd: string, story: Story): string => {
@@ -201,14 +236,36 @@ export interface RunContext {
 export const runStory = async (story: Story, ctx: RunContext): Promise<void> => {
   const { sprint, baseBranch, stagingBranch, runId, testCommand, acceptDir, paths, events, state, persist, emitArtifact } = ctx;
   const ss = state.stories[story.id]!;
-  // Resume guard: a story already merged in a prior run is done. Re-running it
-  // would `git checkout -b` an existing feature branch and FATAL ("already
-  // exists"), aborting the resume. Skip it idempotently — its terminal state is
-  // already recorded. (Surfaced by the 2026-05-31 nettobrand shakedown: a resume
-  // after a post-merge board-write failure re-cut the merged story's branch.)
+  const featureBranch = `pi-team-lean/${runId}/story-${story.id}`;
+  const reconcileCwd = resolveStoryCwd(ctx.repoCwd, story);
+
+  // --- Resume reconciliation (state-isolation-resume-staleness) ---
+  // Recorded state and git ground truth can diverge (crash between mergeNoFf and
+  // persist, kill -9, hand-edited state). Reconcile against git before trusting
+  // the recorded status instead of blindly short-circuiting on 'merged' or
+  // re-cutting an existing feature branch (which FATAL-ed `git checkout -b`).
   if (ss.status === "merged") {
-    log(`SKIP  ${story.id}: already merged`);
-    return;
+    const tip = ss.commits?.[0];
+    const reachable = tip ? isReachableFrom(tip, stagingBranch, reconcileCwd) : true;
+    if (reachable) {
+      log(`SKIP  ${story.id}: already merged (verified reachable from ${stagingBranch})`);
+      return;
+    }
+    // State says merged but the commit is NOT on staging — the post-merge state
+    // write must have landed before the merge actually persisted, or staging was
+    // rewound. Re-run from scratch rather than silently skipping unmerged work.
+    log(`RECONCILE ${story.id}: recorded 'merged' but commit not reachable from ${stagingBranch} — re-running`);
+    events.emit({ type: "log", message: `reconcile ${story.id}: merged-but-unreachable, re-running` });
+    ss.status = "pending";
+  }
+  // A leftover feature branch from a crashed/interrupted prior attempt would make
+  // the upcoming `git checkout -b` FATAL. Delete it so the re-run starts clean.
+  // (Reached only for a non-merged story: the merged+reachable case already
+  // returned, and merged-but-unreachable was reset to 'pending' above.)
+  if (branchExists(featureBranch, reconcileCwd)) {
+    log(`RECONCILE ${story.id}: deleting stale feature branch ${featureBranch}`);
+    deleteBranch(featureBranch, reconcileCwd);
+    events.emit({ type: "git", action: "delete_branch", branch: featureBranch });
   }
   const blockers = (story.depends_on ?? []).filter((d) => state.stories[d]?.status !== "merged");
   if (blockers.length > 0) {
@@ -234,7 +291,6 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
   ensureStagingBranch(stagingBranch, storyBaseBranch, storyCwd, events);
 
   // 1. Cut feature branch from staging, run worker (worker does NOT see acceptance criteria)
-  const featureBranch = `pi-team-lean/${runId}/story-${story.id}`;
   events.emit({ type: "phase_started", storyId: story.id, phase: "staging", detail: `cut ${featureBranch}` });
   cutBranch(featureBranch, stagingBranch, storyCwd);
   events.emit({ type: "git", action: "cut_branch", branch: featureBranch, fromBranch: stagingBranch });
@@ -275,9 +331,35 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     events.emit({ type: "log", message: `retry ${story.id}: ${phase} failed, attempt ${iter + 1}/${maxIter}` });
   };
 
+  /**
+   * no-progress guard: if this iteration's (worker diff + failure signature) is
+   * identical to the previous one, the worker is stuck reproducing the same
+   * failure and burning budget — park now instead of looping
+   * (feedback-overwrite-not-accumulate companion guard). Returns true when the
+   * caller should stop (the story has been parked).
+   */
+  const stuckOnSameFailure = (phase: string, iter: number, failureOutput: string): boolean => {
+    const sig = attemptSignature(workerDiff, phase, failureOutput);
+    if (lastSignature !== undefined && sig === lastSignature) {
+      events.emit({ type: "no_progress", storyId: story.id, iteration: iter, signature: phase });
+      endStory("needs_human", `no progress: ${phase} produced an identical diff + failure two iterations in a row (iter ${iter})`);
+      return true;
+    }
+    lastSignature = sig;
+    return false;
+  };
+
   let workerDiff = "";
   let lastReview: ReviewResult | undefined;
   let feedback = "";
+  let lastSignature: string | undefined;
+
+  // worker-commit-guard (worker-commit-guard-fragile): snapshot the tip of every
+  // local branch EXCEPT the feature branch before the worker runs. After the
+  // worker we assert none of them moved — the worker prompt forbids touching any
+  // branch but its own, so a moved staging/main/other ref means the worker
+  // escaped scope (or pushed/merged) and the story must be parked, not merged.
+  const branchHeadsBeforeWorker = localBranchHeads(storyCwd);
 
   // Bounded delivery loop: worker → reviewer → verify → acceptance. Any phase
   // failure (with budget + retry enabled) feeds typed feedback back to the next
@@ -331,7 +413,7 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       const reason = w.timedOut ? `worker timed out after ${timeoutMin}m (iter ${iter})` : `worker exit ${w.exitCode} (iter ${iter})`;
       events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: reason, iteration: iter });
       if (retry.worker && iter < maxIter) {
-        feedback = workerCrashFeedback(reason, w.stderr);
+        feedback = accumulateFeedback(feedback, workerCrashFeedback(reason, w.stderr), iter);
         noteRetry("worker", iter);
         continue;
       }
@@ -343,12 +425,27 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       const reason = `worker exited but made no commits (iter ${iter})`;
       events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: reason, iteration: iter });
       if (retry.worker && iter < maxIter) {
-        feedback = workerCrashFeedback(reason, w.stderr);
+        feedback = accumulateFeedback(feedback, workerCrashFeedback(reason, w.stderr), iter);
         noteRetry("worker", iter);
         continue;
       }
       return endStory(retry.worker ? "needs_human" : "failed", reason);
     }
+
+    // worker-commit guard: assert ONLY the feature branch advanced. Any other
+    // local ref moving means the worker escaped its sandbox (merged/reset/etc.).
+    const headsAfter = localBranchHeads(storyCwd);
+    const movedOther = Object.entries(headsAfter).find(
+      ([b, sha]) => b !== featureBranch && branchHeadsBeforeWorker[b] !== undefined && branchHeadsBeforeWorker[b] !== sha,
+    );
+    if (movedOther) {
+      const [branch, sha] = movedOther;
+      const reason = `worker mutated a branch it must not touch: ${branch} moved ${branchHeadsBeforeWorker[branch]?.slice(0, 8)} → ${sha.slice(0, 8)} (iter ${iter})`;
+      events.emit({ type: "phase_finished", storyId: story.id, phase: "worker", ok: false, detail: reason, iteration: iter });
+      // This is an integrity violation, not a code-quality miss — park for a human.
+      return endStory("needs_human", reason);
+    }
+
     ss.commits = commitsSoFar;
     workerDiff = diffBetween(stagingBranch, featureBranch, storyCwd);
     const workerDiffPath = paths.artifact(story.id, ARTIFACTS.workerDiff);
@@ -368,6 +465,18 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       emitArtifact(story.id, `reviewer.iter${iter}.json`, reviewerIterPath);
       writeJsonArtifact(reviewerJudgementPath, review);
       emitArtifact(story.id, ARTIFACTS.reviewerJudgement, reviewerJudgementPath);
+      if (review.diff_truncated) {
+        events.emit({ type: "diff_truncated", storyId: story.id, phase: "reviewer", omitted: workerDiff.length - 80000, cap: 80000 });
+      }
+      if (review.degraded) {
+        // FAIL CLOSED: the reviewer gate could not run — do NOT treat as approve.
+        // Park as needs_human with an explicit degraded-gate event so a human
+        // sees the gate was bypassed by infrastructure, not by a real verdict.
+        log(`PARK  ${story.id}: reviewer gate degraded (${review.degraded_reason})`);
+        events.emit({ type: "degraded_gate", storyId: story.id, gate: "reviewer", reason: review.degraded_reason ?? "unknown" });
+        events.emit({ type: "phase_finished", storyId: story.id, phase: "reviewer", ok: false, detail: `degraded: ${review.degraded_reason}`, iteration: iter });
+        return endStory("needs_human", `reviewer gate degraded (fail-closed): ${review.degraded_reason}`);
+      }
       const mustFix = review.issues.filter((i) => i.severity === "must_fix");
       log(`reviewer: ${review.verdict} (${mustFix.length} must_fix, ${review.issues.length - mustFix.length} nice_to_have)`);
       events.emit({
@@ -382,7 +491,8 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       lastReview = review;
       if (review.verdict !== "approve") {
         if (retry.reviewer && iter < maxIter) {
-          feedback = reviewerFeedbackForWorker(review);
+          if (stuckOnSameFailure("reviewer", iter, mustFix.map((m) => `${m.file}:${m.line} ${m.problem}`).join("\n"))) return;
+          feedback = accumulateFeedback(feedback, reviewerFeedbackForWorker(review), iter);
           noteRetry("reviewer", iter);
           continue;
         }
@@ -404,7 +514,8 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     events.emit({ type: "phase_finished", storyId: story.id, phase: "verify", ok: t.ok, detail: t.ok ? "tests passed" : "tests failed" });
     if (!t.ok) {
       if (retry.test && iter < maxIter) {
-        feedback = testFailureFeedback(t.output);
+        if (stuckOnSameFailure("verify", iter, t.output)) return;
+        feedback = accumulateFeedback(feedback, testFailureFeedback(t.output), iter);
         noteRetry("verify", iter);
         continue;
       }
@@ -431,8 +542,10 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
         ? `qa-script author timed out after ${DEFAULT_QA_TIMEOUT_MIN}m`
         : `qa-script author failed (exit ${qa.exitCode})\n${qa.stderr.slice(0, 500)}`;
       events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: false, detail: reason });
-      // qa-author is harness infrastructure, not the worker's code — fail hard, don't park.
-      return endStory("failed", reason);
+      // qa-author is harness INFRASTRUCTURE, not the worker's code. The worker
+      // already produced a reviewed, test-passing commit — don't discard it as a
+      // hard failure. Park for a human to re-run the gate (qa-author-fail-hard-not-park).
+      return endStory("needs_human", `qa-author gate could not run (work is salvageable): ${reason}`);
     }
     writeFileSync(acceptPath, qa.stdout);
     chmodSync(acceptPath, 0o755);
@@ -441,9 +554,26 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     emitArtifact(story.id, ARTIFACTS.qaScript, qaScriptPath);
     events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: true, detail: acceptPath });
 
-    log(`accept: ${acceptPath}`);
+    log(`accept: ${acceptPath} (sandboxed)`);
     events.emit({ type: "phase_started", storyId: story.id, phase: "acceptance", detail: acceptPath });
-    const a = runTestCommand(`bash ${acceptPath}`, storyCwd);
+    // The acceptance script is LLM-authored from an untrusted story body + diff
+    // (qa-script-arbitrary-exec). Run it through the content gate + isolation
+    // sandbox instead of chmod+exec on the host with full env.
+    const sandboxResult = runSandboxed(qa.stdout, {
+      scriptPath: acceptPath,
+      cwd: storyCwd,
+      timeoutMs: DEFAULT_QA_TIMEOUT_MIN * 60 * 1000,
+    });
+    if (sandboxResult.rejected) {
+      // A dangerous construct (rm -rf / push / network) was found — never executed.
+      // This is a prompt-injection / untrusted-output event: park for a human.
+      events.emit({ type: "sandbox_rejected", storyId: story.id, reason: sandboxResult.rejectReason ?? "content gate" });
+      events.emit({ type: "phase_finished", storyId: story.id, phase: "acceptance", ok: false, detail: `rejected: ${sandboxResult.rejectReason}` });
+      writeArtifact(paths.artifact(story.id, ARTIFACTS.qaScriptOutput), sandboxResult.output);
+      return endStory("needs_human", `acceptance script rejected by content gate: ${sandboxResult.rejectReason}`);
+    }
+    log(`accept: ran in ${sandboxResult.mode} sandbox`);
+    const a = { ok: sandboxResult.ok, output: sandboxResult.output };
     const qaOutputPath = paths.artifact(story.id, ARTIFACTS.qaScriptOutput);
     writeArtifact(qaOutputPath, a.output);
     emitArtifact(story.id, ARTIFACTS.qaScriptOutput, qaOutputPath);
@@ -457,7 +587,8 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
         // the feature boundary (B2). verify + reviewer remain the blocking gates.
         log(`WARN  ${story.id}: acceptance failed (advisory) — proceeding`);
       } else if (retry.acceptance && iter < maxIter) {
-        feedback = acceptanceFailureFeedback(a.output);
+        if (stuckOnSameFailure("acceptance", iter, a.output)) return;
+        feedback = accumulateFeedback(feedback, acceptanceFailureFeedback(a.output), iter);
         noteRetry("acceptance", iter);
         continue;
       } else {
@@ -475,6 +606,18 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       const scenarioJudgementPath = paths.artifact(story.id, ARTIFACTS.scenarioJudgement);
       writeJsonArtifact(scenarioJudgementPath, judgement);
       emitArtifact(story.id, ARTIFACTS.scenarioJudgement, scenarioJudgementPath);
+      if (judgement.diff_truncated) {
+        events.emit({ type: "diff_truncated", storyId: story.id, phase: "scenario-judge", omitted: diff.length - 60000, cap: 60000 });
+      }
+      if (judgement.gate_errored) {
+        // FAIL CLOSED: every judge crashed/timed out, so the panel produced no
+        // signal. Don't read the empty consensus as a lenient pass — park with a
+        // degraded-gate event (reviewer-judge-fail-open).
+        log(`PARK  ${story.id}: scenario-judge panel all-errored — gate_errored`);
+        events.emit({ type: "degraded_gate", storyId: story.id, gate: "scenario-judge", reason: "all judges crashed/timed out" });
+        events.emit({ type: "phase_finished", storyId: story.id, phase: "scenario-judge", ok: false, detail: "gate_errored" });
+        return endStory("needs_human", "scenario-judge gate errored (all judges failed) — fail-closed park");
+      }
       const failed = judgement.consensus.filter((c) => c.verdict === "fail");
       const inconclusive = judgement.consensus.filter((c) => c.verdict === "inconclusive");
       if (failed.length > 0) {
@@ -490,10 +633,52 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       log(`judge: no scenarios found for ${story.id} in ${sprint.feature_path}`);
     }
 
-    // 6. Merge feature → staging — story is green and reviewed
+    // 6. Merge feature → staging — story is green and reviewed.
+    // A merge conflict against staging is an EXPECTED per-story terminal state
+    // (overlapping edits with an earlier merged story), never sprint-fatal. The
+    // previous bare mergeNoFf threw to process.exit(1) and left staging in a
+    // MERGING state that bricked the next resume's clean-tree preflight
+    // (merge-conflict-unhandled). tryMergeNoFf aborts on conflict so the tree is
+    // clean, and we park the story instead of crashing the sprint.
     events.emit({ type: "phase_started", storyId: story.id, phase: "merge", detail: `${featureBranch} → ${stagingBranch}` });
-    mergeNoFf(featureBranch, stagingBranch, `merge: ${story.id} ${story.title}`, storyCwd);
+    const merge = tryMergeNoFf(featureBranch, stagingBranch, `merge: ${story.id} ${story.title}`, storyCwd);
+    if (!merge.ok) {
+      if (merge.conflict) {
+        events.emit({ type: "git", action: "merge_abort", branch: stagingBranch });
+        events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: false, detail: "merge conflict (aborted)" });
+        return endStory("needs_human", `merge conflict against ${stagingBranch}: ${merge.detail.split("\n").slice(0, 6).join("\n")}`);
+      }
+      events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: false, detail: "merge error" });
+      return endStory("needs_human", `merge failed against ${stagingBranch}: ${merge.detail.split("\n").slice(0, 6).join("\n")}`);
+    }
     events.emit({ type: "git", action: "merge", fromBranch: featureBranch, intoBranch: stagingBranch, message: `merge: ${story.id} ${story.title}` });
+
+    // Post-merge verification (acceptance-validates-premerge-no-postmerge-verify):
+    // each story was green in isolation against the staging state it BRANCHED
+    // from, but stories merge sequentially into shared staging. A clean textual
+    // merge can still be a semantic break (story B never saw story A's change).
+    // Re-run the test command on the merged staging; on failure revert the merge
+    // (reset to ORIG_HEAD) and park so staging never ends a sprint red while the
+    // story reads 'merged'. Skipped only when explicitly opted out.
+    if (sprint.skip_postmerge_verify) {
+      log(`skip post-merge verify (skip_postmerge_verify)`);
+    } else {
+      log(`post-merge verify on ${stagingBranch}: ${story.test_command ?? testCommand}`);
+      const pv = runTestCommand(story.test_command ?? testCommand, storyCwd);
+      writeArtifact(paths.artifact(story.id, "postmerge-verify.output.log"), pv.output);
+      if (!pv.ok) {
+        const reverted = resetToOrigHead(storyCwd);
+        events.emit({ type: "postmerge_verify", storyId: story.id, ok: false, reverted: reverted.ok });
+        if (reverted.ok) events.emit({ type: "git", action: "merge_revert", branch: stagingBranch });
+        events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: false, detail: "post-merge verify failed (reverted)" });
+        return endStory(
+          "needs_human",
+          `post-merge verify failed on ${stagingBranch}${reverted.ok ? " (merge reverted)" : " (REVERT FAILED — manual fix needed)"}:\n${pv.output.slice(-1500)}`,
+        );
+      }
+      events.emit({ type: "postmerge_verify", storyId: story.id, ok: true, reverted: false });
+    }
+
     events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: true, detail: stagingBranch });
     ss.status = "merged";
     ss.ended_at = new Date().toISOString();
@@ -566,7 +751,9 @@ export const runSprint = async (sprint: Sprint, opts: RunSprintOptions): Promise
     stateUniverse,
   );
   const persist = (): void => {
-    writeFileSync(statePath, JSON.stringify(state, null, 2));
+    // Atomic state write (write-temp + rename): a crash mid-write must never
+    // leave sprint-state.json truncated, or a resume reads garbage JSON.
+    writeFileAtomic(statePath, JSON.stringify(state, null, 2));
     events.emit({ type: "state_written", path: statePath });
     for (const [sid, ss] of Object.entries(state.stories)) {
       if (ss.status === "pending") continue;
@@ -667,7 +854,12 @@ const main = async (): Promise<void> => {
   });
 };
 
-main().catch((e: Error) => {
-  console.error(`[pi-team-lean] FATAL: ${e.message}`);
-  process.exit(1);
-});
+// Run the CLI as a side-effect of import (the bin entry does `import dist/index.js`).
+// Skip under vitest so unit tests can import runStory/runSprint/helpers without
+// triggering an argv-driven sprint run.
+if (!process.env.VITEST) {
+  main().catch((e: Error) => {
+    console.error(`[pi-team-lean] FATAL: ${e.message}`);
+    process.exit(1);
+  });
+}

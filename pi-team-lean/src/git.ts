@@ -36,7 +36,68 @@ export const mergeNoFf = (sourceBranch: string, intoBranch: string, message: str
   git(["merge", "--no-ff", "-m", message, sourceBranch], cwd);
 };
 
+export interface MergeOutcome {
+  ok: boolean;
+  /** True when the failure is a merge conflict (vs. some other git error). */
+  conflict: boolean;
+  /** git stderr/stdout when ok is false. */
+  detail: string;
+}
+
+/**
+ * Attempt a `--no-ff` merge without throwing. On a conflict (or any other merge
+ * failure) the merge is aborted so the working tree is left clean — a conflict
+ * is an expected per-story terminal state, never sprint-fatal (the previous bare
+ * `mergeNoFf` threw to process.exit(1) and left staging in a MERGING state).
+ */
+export const tryMergeNoFf = (sourceBranch: string, intoBranch: string, message: string, cwd: string): MergeOutcome => {
+  const co = tryGit(["checkout", intoBranch], cwd);
+  if (!co.ok) return { ok: false, conflict: false, detail: co.out };
+  const m = tryGit(["merge", "--no-ff", "-m", message, sourceBranch], cwd);
+  if (m.ok) return { ok: true, conflict: false, detail: "" };
+  // Determine whether we are mid-merge (conflict) and abort to restore a clean tree.
+  const conflicted = inMergeState(cwd);
+  if (conflicted) abortMerge(cwd);
+  return { ok: false, conflict: conflicted, detail: m.out };
+};
+
+/** True when the repo is mid-merge (MERGE_HEAD present). */
+export const inMergeState = (cwd: string): boolean => tryGit(["rev-parse", "--verify", "MERGE_HEAD"], cwd).ok;
+
+/** Abort an in-progress merge; best-effort (no throw). */
+export const abortMerge = (cwd: string): void => {
+  tryGit(["merge", "--abort"], cwd);
+};
+
+/** Hard-reset the current branch to ORIG_HEAD (undo the just-completed merge). */
+export const resetToOrigHead = (cwd: string): { ok: boolean; out: string } =>
+  tryGit(["reset", "--hard", "ORIG_HEAD"], cwd);
+
+/** True when `commit` (a sha or ref) is an ancestor of / reachable from `branch`. */
+export const isReachableFrom = (commit: string, branch: string, cwd: string): boolean =>
+  tryGit(["merge-base", "--is-ancestor", commit, branch], cwd).ok;
+
+/** Delete a local branch (force). Best-effort, no throw. */
+export const deleteBranch = (branch: string, cwd: string): { ok: boolean; out: string } =>
+  tryGit(["branch", "-D", branch], cwd);
+
 export const headSha = (cwd: string): string => git(["rev-parse", "HEAD"], cwd);
+
+/**
+ * Snapshot the tip sha of every local branch — used to assert, after the worker
+ * runs, that ONLY the feature branch advanced (worker-commit-guard-fragile).
+ */
+export const localBranchHeads = (cwd: string): Record<string, string> => {
+  const r = tryGit(["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads"], cwd);
+  const out: Record<string, string> = {};
+  if (!r.ok) return out;
+  for (const line of r.out.split("\n")) {
+    const sp = line.indexOf(" ");
+    if (sp <= 0) continue;
+    out[line.slice(0, sp)] = line.slice(sp + 1).trim();
+  }
+  return out;
+};
 
 export const commitsOnBranch = (branch: string, sinceBranch: string, cwd: string): string[] => {
   const r = tryGit(["log", `${sinceBranch}..${branch}`, "--format=%H"], cwd);

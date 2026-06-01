@@ -1,4 +1,7 @@
+import { truncateForPrompt } from "./truncate.js";
 import type { Story } from "./types.js";
+
+const QA_DIFF_CAP = 60000;
 
 export const qaScriptPrompt = (story: Story, diff: string): string => `You are authoring acceptance checks for a user story that has just been implemented. Output a single bash script that exits 0 only when the implementation correctly satisfies the story.
 
@@ -12,7 +15,7 @@ ${story.body}
 # Worker diff (what was actually implemented)
 
 \`\`\`diff
-${diff.slice(0, 60000)}
+${truncateForPrompt(diff, QA_DIFF_CAP).text}
 \`\`\`
 
 # Output rules

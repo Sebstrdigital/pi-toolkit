@@ -183,6 +183,11 @@ const eventLabel = (e: TeamLeanEvent): string => {
     case "git": return `${time} ${color.dim("git")} ${e.action} ${e.branch ?? e.fromBranch ?? ""}`;
     case "state_written": return `${time} ${color.dim("state")} ${e.path}`;
     case "log": return `${time} ${e.message}`;
+    case "degraded_gate": return `${time} ${color.red("GATE DEGRADED")} ${e.storyId} ${e.gate} — ${e.reason}`;
+    case "diff_truncated": return `${time} ${color.yellow("diff truncated")} ${e.storyId} ${e.phase} (${e.omitted} bytes omitted)`;
+    case "no_progress": return `${time} ${color.yellow("no progress")} ${e.storyId} iter ${e.iteration} (${e.signature})`;
+    case "sandbox_rejected": return `${time} ${color.red("SANDBOX REJECTED")} ${e.storyId} — ${e.reason}`;
+    case "postmerge_verify": return `${time} ${e.ok ? color.green("post-merge ok") : color.red("post-merge FAIL")} ${e.storyId}${e.reverted ? " (reverted)" : ""}`;
   }
 };
 

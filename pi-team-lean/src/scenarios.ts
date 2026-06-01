@@ -1,6 +1,9 @@
-import { runPi } from "./pi.js";
+import { runPi, DEFAULT_GATE_TIMEOUT_MS } from "./pi.js";
+import { truncateForPrompt } from "./truncate.js";
 import type { Scenario } from "./features.js";
 import type { Story } from "./types.js";
+
+const JUDGE_DIFF_CAP = 60000;
 
 export type Verdict = "pass" | "fail" | "inconclusive";
 
@@ -11,11 +14,13 @@ interface ScenarioVerdict {
   gap: string | null;
 }
 
-interface SingleJudgement {
+export interface SingleJudgement {
   scenarios: ScenarioVerdict[];
   summary: string;
   raw?: string;
   parse_error?: string;
+  /** True when this single judge crashed/timed out/returned unparseable output. */
+  errored?: boolean;
 }
 
 interface ConsensusEntry {
@@ -30,6 +35,14 @@ export interface Judgement {
   judges: SingleJudgement[];
   consensus: ConsensusEntry[];
   overall: Verdict;
+  /**
+   * True when EVERY judge crashed/timed out — the panel produced no real signal.
+   * The caller fails CLOSED (park as gate_errored) rather than treating an
+   * empty consensus as a lenient pass (reviewer-judge-fail-open).
+   */
+  gate_errored?: boolean;
+  /** True when the judged diff was truncated to fit the prompt budget. */
+  diff_truncated?: boolean;
 }
 
 const judgePrompt = (story: Story, scenarios: Scenario[], diff: string, testOutput: string): string => `You are an impartial code reviewer judging whether a worker's implementation satisfies a set of acceptance scenarios. Respond with a single JSON object only — no markdown fences, no prose outside the JSON.
@@ -45,7 +58,7 @@ ${scenarios.map((s) => `- ${s.id}: ${s.text}`).join("\n")}
 
 # Worker diff (what changed)
 \`\`\`diff
-${diff.slice(0, 60000)}
+${truncateForPrompt(diff, JUDGE_DIFF_CAP).text}
 \`\`\`
 
 # Test command output (last 200 lines)
@@ -75,7 +88,7 @@ Judge based on behavior, not naming. Test method names, identifier choices, and 
 
 Return JSON now.`;
 
-const parseJudgement = (raw: string): SingleJudgement => {
+export const parseJudgement = (raw: string): SingleJudgement => {
   try {
     const start = raw.indexOf("{");
     const end = raw.lastIndexOf("}");
@@ -84,7 +97,7 @@ const parseJudgement = (raw: string): SingleJudgement => {
     if (!Array.isArray(obj.scenarios)) throw new Error("scenarios not array");
     return { scenarios: obj.scenarios, summary: obj.summary ?? "", raw };
   } catch (e: unknown) {
-    return { scenarios: [], summary: "", raw, parse_error: (e as Error).message };
+    return { scenarios: [], summary: "", raw, parse_error: (e as Error).message, errored: true };
   }
 };
 
@@ -95,9 +108,13 @@ const runOneJudge = async (
   testOutput: string,
   cwd: string,
   model: string | undefined,
+  timeoutMs: number,
 ): Promise<SingleJudgement> => {
-  const r = await runPi(judgePrompt(story, scenarios, diff, testOutput), cwd, model);
-  if (r.exitCode !== 0) return { scenarios: [], summary: "", raw: r.stderr, parse_error: `exit ${r.exitCode}` };
+  const r = await runPi(judgePrompt(story, scenarios, diff, testOutput), cwd, model, undefined, { timeoutMs });
+  if (r.exitCode !== 0) {
+    const reason = r.timedOut ? `timeout after ${Math.round(timeoutMs / 60000)}m` : `exit ${r.exitCode}`;
+    return { scenarios: [], summary: "", raw: r.stderr, parse_error: reason, errored: true };
+  }
   return parseJudgement(r.stdout);
 };
 
@@ -135,12 +152,22 @@ export const judgeScenarios = async (
   testOutput: string,
   cwd: string,
   model: string | undefined,
+  timeoutMs: number = DEFAULT_GATE_TIMEOUT_MS,
 ): Promise<Judgement> => {
   const judges = await Promise.all([
-    runOneJudge(story, scenarios, diff, testOutput, cwd, model),
-    runOneJudge(story, scenarios, diff, testOutput, cwd, model),
-    runOneJudge(story, scenarios, diff, testOutput, cwd, model),
+    runOneJudge(story, scenarios, diff, testOutput, cwd, model, timeoutMs),
+    runOneJudge(story, scenarios, diff, testOutput, cwd, model, timeoutMs),
+    runOneJudge(story, scenarios, diff, testOutput, cwd, model, timeoutMs),
   ]);
   const consensus = consensusFor(scenarios, judges);
-  return { judges, consensus, overall: overallFor(consensus) };
+  // An all-crashed panel produced no signal: every judge errored. Surface it so
+  // the caller fails closed instead of reading the empty consensus as a pass.
+  const gate_errored = judges.length > 0 && judges.every((j) => j.errored === true);
+  return {
+    judges,
+    consensus,
+    overall: overallFor(consensus),
+    gate_errored,
+    diff_truncated: diff.length > JUDGE_DIFF_CAP,
+  };
 };

@@ -1,5 +1,18 @@
-import { mkdirSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
+
+/**
+ * Write a file atomically: write to a sibling temp file then rename over the
+ * target. rename(2) is atomic on POSIX, so a crash mid-write can never leave a
+ * truncated/partial state file behind (the previous bare writeFileSync could
+ * leave sprint-state.json half-written → a resume reading garbage JSON). The
+ * temp file lives in the same directory so the rename stays on one filesystem.
+ */
+export const writeFileAtomic = (path: string, content: string): void => {
+  const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, path);
+};
 
 export interface RunPaths {
   root: string;
@@ -28,11 +41,11 @@ export const runPaths = (repoCwd: string, runId: string): RunPaths => {
 };
 
 export const writeArtifact = (path: string, content: string): void => {
-  writeFileSync(path, content);
+  writeFileAtomic(path, content);
 };
 
 export const writeJsonArtifact = (path: string, obj: unknown): void => {
-  writeFileSync(path, JSON.stringify(obj, null, 2));
+  writeFileAtomic(path, JSON.stringify(obj, null, 2));
 };
 
 export const appendArtifact = (path: string, line: string): void => {
