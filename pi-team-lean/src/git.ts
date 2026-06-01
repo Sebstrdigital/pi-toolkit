@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
 
+const GIT_TIMEOUT_MS = 120_000;
+
 const git = (args: string[], cwd: string): string =>
-  execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: GIT_TIMEOUT_MS }).trim();
 
 const tryGit = (args: string[], cwd: string): { ok: boolean; out: string } => {
   try {
@@ -73,6 +75,10 @@ export const abortMerge = (cwd: string): void => {
 export const resetToOrigHead = (cwd: string): { ok: boolean; out: string } =>
   tryGit(["reset", "--hard", "ORIG_HEAD"], cwd);
 
+/** Hard-reset the current branch to an explicit commit SHA. */
+export const resetHard = (commit: string, cwd: string): { ok: boolean; out: string } =>
+  tryGit(["reset", "--hard", commit], cwd);
+
 /** True when `commit` (a sha or ref) is an ancestor of / reachable from `branch`. */
 export const isReachableFrom = (commit: string, branch: string, cwd: string): boolean =>
   tryGit(["merge-base", "--is-ancestor", commit, branch], cwd).ok;
@@ -81,7 +87,7 @@ export const isReachableFrom = (commit: string, branch: string, cwd: string): bo
 export const deleteBranch = (branch: string, cwd: string): { ok: boolean; out: string } =>
   tryGit(["branch", "-D", branch], cwd);
 
-export const headSha = (cwd: string): string => git(["rev-parse", "HEAD"], cwd);
+export const headSha = (cwd: string, ref = "HEAD"): string => git(["rev-parse", ref], cwd);
 
 /**
  * Snapshot the tip sha of every local branch — used to assert, after the worker

@@ -9,12 +9,13 @@ import {
   checkout,
   branchExists,
   tryMergeNoFf,
-  resetToOrigHead,
+  resetHard,
   isReachableFrom,
   deleteBranch,
   localBranchHeads,
   commitsOnBranch,
   diffBetween,
+  headSha,
 } from "./git.js";
 import { runSandboxed } from "./sandbox.js";
 import { allowListedEnv } from "./env.js";
@@ -29,6 +30,7 @@ import type { Sprint, SprintState, StoryState, Story, StoryStatus } from "./type
 
 const DEFAULT_WORKER_TIMEOUT_MIN = 15;
 const DEFAULT_QA_TIMEOUT_MIN = 10;
+const DEFAULT_TEST_TIMEOUT_MIN = 30;
 
 const log = (msg: string): void => console.log(`[pi-team-lean] ${msg}`);
 
@@ -135,23 +137,26 @@ const openTmuxWatcher = (repoCwd: string, runId: string): void => {
   }
 };
 
-const runTestCommand = (cmd: string, cwd: string): { ok: boolean; output: string } => {
+export const runTestCommand = (cmd: string, cwd: string, timeoutMs: number): { ok: boolean; output: string; timedOut: boolean } => {
   try {
     const output = execFileSync("sh", ["-c", cmd], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 10 * 1024 * 1024,
+      timeout: timeoutMs,
       // Explicit allow-listed env: the test command is config/LLM-influenced and
       // must not inherit the operator's full secret-bearing process.env
       // (qa-script-arbitrary-exec, exfil half).
       env: allowListedEnv(),
     });
-    return { ok: true, output };
+    return { ok: true, output, timedOut: false };
   } catch (e: unknown) {
-    const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
+    const err = e as { stdout?: Buffer | string; stderr?: Buffer | string; signal?: string; code?: string };
     const out = (err.stdout?.toString() ?? "") + (err.stderr?.toString() ?? "");
-    return { ok: false, output: out };
+    const timedOut = err.signal === "SIGTERM" || err.code === "ETIMEDOUT";
+    const timeoutNote = timedOut ? `\ntest_command timed out after ${Math.round(timeoutMs / 1000)}s\n` : "";
+    return { ok: false, output: `${out}${timeoutNote}`, timedOut };
   }
 };
 
@@ -299,6 +304,8 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
   persist();
 
   const maxIter = Math.max(1, sprint.max_iterations ?? sprint.max_review_iterations ?? 3);
+  const testTimeoutMin = story.test_timeout_min ?? sprint.test_timeout_min ?? DEFAULT_TEST_TIMEOUT_MIN;
+  const testTimeoutMs = testTimeoutMin * 60 * 1000;
   const retry = {
     worker: sprint.retry_on?.worker ?? true,
     reviewer: sprint.retry_on?.reviewer ?? true,
@@ -504,15 +511,18 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     }
 
     // 3. Verify (test command)
-    log(`verify: ${story.test_command ?? testCommand}`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "verify", detail: story.test_command ?? testCommand });
-    const t = runTestCommand(story.test_command ?? testCommand, storyCwd);
+    log(`verify: ${story.test_command ?? testCommand} (timeout ${testTimeoutMin}m)`);
+    events.emit({ type: "phase_started", storyId: story.id, phase: "verify", detail: `${story.test_command ?? testCommand}, timeout ${testTimeoutMin}m` });
+    const t = runTestCommand(story.test_command ?? testCommand, storyCwd, testTimeoutMs);
     const testOutputPath = paths.artifact(story.id, ARTIFACTS.testCommandOutput);
     writeArtifact(testOutputPath, t.output);
     emitArtifact(story.id, ARTIFACTS.testCommandOutput, testOutputPath);
     events.emit({ type: "test_output", storyId: story.id, phase: "verify", ok: t.ok, tail: t.output.split("\n").slice(-80).join("\n") });
     events.emit({ type: "phase_finished", storyId: story.id, phase: "verify", ok: t.ok, detail: t.ok ? "tests passed" : "tests failed" });
     if (!t.ok) {
+      if (t.timedOut) {
+        return endStory("needs_human", `test_command timed out after ${testTimeoutMin}m:\n${t.output.slice(-1500)}`);
+      }
       if (retry.test && iter < maxIter) {
         if (stuckOnSameFailure("verify", iter, t.output)) return;
         feedback = accumulateFeedback(feedback, testFailureFeedback(t.output), iter);
@@ -641,6 +651,7 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     // (merge-conflict-unhandled). tryMergeNoFf aborts on conflict so the tree is
     // clean, and we park the story instead of crashing the sprint.
     events.emit({ type: "phase_started", storyId: story.id, phase: "merge", detail: `${featureBranch} → ${stagingBranch}` });
+    const preMerge = headSha(storyCwd, stagingBranch);
     const merge = tryMergeNoFf(featureBranch, stagingBranch, `merge: ${story.id} ${story.title}`, storyCwd);
     if (!merge.ok) {
       if (merge.conflict) {
@@ -663,17 +674,18 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     if (sprint.skip_postmerge_verify) {
       log(`skip post-merge verify (skip_postmerge_verify)`);
     } else {
-      log(`post-merge verify on ${stagingBranch}: ${story.test_command ?? testCommand}`);
-      const pv = runTestCommand(story.test_command ?? testCommand, storyCwd);
+      log(`post-merge verify on ${stagingBranch}: ${story.test_command ?? testCommand} (timeout ${testTimeoutMin}m)`);
+      const pv = runTestCommand(story.test_command ?? testCommand, storyCwd, testTimeoutMs);
       writeArtifact(paths.artifact(story.id, "postmerge-verify.output.log"), pv.output);
       if (!pv.ok) {
-        const reverted = resetToOrigHead(storyCwd);
-        events.emit({ type: "postmerge_verify", storyId: story.id, ok: false, reverted: reverted.ok });
-        if (reverted.ok) events.emit({ type: "git", action: "merge_revert", branch: stagingBranch });
+        const reverted = resetHard(preMerge, storyCwd);
+        const restored = reverted.ok && headSha(storyCwd) === preMerge;
+        events.emit({ type: "postmerge_verify", storyId: story.id, ok: false, reverted: restored });
+        if (restored) events.emit({ type: "git", action: "merge_revert", branch: stagingBranch });
         events.emit({ type: "phase_finished", storyId: story.id, phase: "merge", ok: false, detail: "post-merge verify failed (reverted)" });
         return endStory(
           "needs_human",
-          `post-merge verify failed on ${stagingBranch}${reverted.ok ? " (merge reverted)" : " (REVERT FAILED — manual fix needed)"}:\n${pv.output.slice(-1500)}`,
+          `post-merge verify ${pv.timedOut ? `timed out after ${testTimeoutMin}m` : `failed`} on ${stagingBranch}${restored ? " (merge reverted)" : " (REVERT FAILED — manual fix needed)"}:\n${pv.output.slice(-1500)}`,
         );
       }
       events.emit({ type: "postmerge_verify", storyId: story.id, ok: true, reverted: false });
