@@ -20,6 +20,7 @@ const git = (args: string[], cwd: string): { ok: boolean; out: string } => {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: 120_000,
     }).trim();
     return { ok: true, out };
   } catch (e: unknown) {

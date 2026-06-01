@@ -8,6 +8,7 @@ export interface Story {
   test_command?: string;
   feature_story_id?: string;
   worker_timeout_min?: number;
+  test_timeout_min?: number;
 }
 
 export interface Sprint {
@@ -48,6 +49,7 @@ export interface Sprint {
     acceptance?: boolean;
   };
   worker_timeout_min?: number;
+  test_timeout_min?: number;
   stories: Story[];
 }
 

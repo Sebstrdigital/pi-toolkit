@@ -29,6 +29,13 @@ describe("reviewer fail-closed parsing (reviewer-judge-fail-open)", () => {
     expect(r.verdict).toBe("request_changes");
     expect(r.degraded).toBe(true);
   });
+
+  it("reviewer-ambiguous-verdict→request_changes", () => {
+    const r = parseReview('{"verdict":"ship_it","issues":[],"summary":"looks okay"}');
+    expect(r.verdict).toBe("request_changes");
+    expect(r.degraded).toBe(true);
+    expect(r.degraded_reason).toMatch(/ambiguous verdict/i);
+  });
 });
 
 describe("scenario judge parse marks crashes as errored", () => {

@@ -112,7 +112,7 @@ export const parseReview = (raw: string): ReviewResult => {
     const end = raw.lastIndexOf("}");
     if (start < 0 || end < 0) throw new Error("no JSON object found");
     const obj = JSON.parse(raw.slice(start, end + 1));
-    const verdict = obj.verdict === "request_changes" ? "request_changes" : "approve";
+    const verdict = obj.verdict === "approve" ? "approve" : "request_changes";
     const issues: ReviewIssue[] = Array.isArray(obj.issues)
       ? obj.issues.map((i: Record<string, unknown>) => ({
           severity: i.severity === "must_fix" ? "must_fix" : "nice_to_have",
@@ -123,7 +123,19 @@ export const parseReview = (raw: string): ReviewResult => {
           suggested_fix: String(i.suggested_fix ?? ""),
         }))
       : [];
-    return { verdict, issues, summary: String(obj.summary ?? ""), raw };
+    const ambiguous = obj.verdict !== "approve" && obj.verdict !== "request_changes";
+    return {
+      verdict,
+      issues,
+      summary: String(obj.summary ?? ""),
+      raw,
+      ...(ambiguous
+        ? {
+            degraded: true,
+            degraded_reason: `ambiguous verdict: ${String(obj.verdict ?? "missing")}`,
+          }
+        : {}),
+    };
   } catch (e: unknown) {
     // FAIL CLOSED: unparseable reviewer output must not be read as an approve.
     // The reviewer is the strongest safety gate; a non-JSON response is an
