@@ -245,7 +245,7 @@ export interface RunContext {
  * a terminal state (merged / failed / skipped). Does not throw on story failure.
  */
 export const runStory = async (story: Story, ctx: RunContext): Promise<void> => {
-  const { sprint, baseBranch, stagingBranch, runId, testCommand, acceptDir, paths, events, state, persist, emitArtifact } = ctx;
+  const { sprint, baseBranch, stagingBranch, runId, testCommand, paths, events, state, persist, emitArtifact } = ctx;
   const ss = state.stories[story.id]!;
   const featureBranch = `pi-team-lean/${runId}/story-${story.id}`;
   const reconcileCwd = resolveStoryCwd(ctx.repoCwd, story);
@@ -296,8 +296,15 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
   events.emit({ type: "story_started", storyId: story.id, title: story.title });
 
   paths.storyDir(story.id);
-  const acceptPath = join(acceptDir, `${story.id}.sh`);
   const storyCwd = resolveStoryCwd(ctx.repoCwd, story);
+  // B2: acceptance script must live INSIDE storyCwd so it is visible inside the
+  // container at /work/.pi-team-lean/acceptance/<id>.sh — the container mounts
+  // storyCwd (not repoCwd) at /work. For wrapper stories (repo_path set) this
+  // directory differs from the repoCwd-based acceptDir in ctx, so we compute the
+  // path relative to storyCwd every time.
+  const storyAcceptDir = join(storyCwd, ".pi-team-lean", "acceptance");
+  mkdirSync(storyAcceptDir, { recursive: true });
+  const acceptPath = join(storyAcceptDir, `${story.id}.sh`);
   const storyBaseBranch = story.base_branch ?? baseBranch;
   try {
     ensureStagingBranch(stagingBranch, storyBaseBranch, storyCwd, events);
@@ -411,7 +418,7 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       detail: `${featureBranch}, timeout ${timeoutMin}m`,
     });
     const w = await runPi(
-      workerPrompt(story, "", story.test_command ?? testCommand, feedback),
+      workerPrompt(story, "", testCommand, feedback),
       storyCwd,
       sprint.worker_model,
       (line) => {
@@ -533,9 +540,11 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     }
 
     // 3. Verify (test command)
-    log(`verify: ${story.test_command ?? testCommand} (timeout ${testTimeoutMin}m)`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "verify", detail: `${story.test_command ?? testCommand}, timeout ${testTimeoutMin}m` });
-    const t = runTestCommand(story.test_command ?? testCommand, storyCwd, testTimeoutMs);
+    // B1: always use the sprint/config testCommand — never the story-supplied one
+    // (story.test_command is stripped by the factory and ignored here as defense-in-depth).
+    log(`verify: ${testCommand} (timeout ${testTimeoutMin}m)`);
+    events.emit({ type: "phase_started", storyId: story.id, phase: "verify", detail: `${testCommand}, timeout ${testTimeoutMin}m` });
+    const t = runTestCommand(testCommand, storyCwd, testTimeoutMs);
     const testOutputPath = paths.artifact(story.id, ARTIFACTS.testCommandOutput);
     writeArtifact(testOutputPath, t.output);
     emitArtifact(story.id, ARTIFACTS.testCommandOutput, testOutputPath);
@@ -696,8 +705,8 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     if (sprint.skip_postmerge_verify) {
       log(`skip post-merge verify (skip_postmerge_verify)`);
     } else {
-      log(`post-merge verify on ${stagingBranch}: ${story.test_command ?? testCommand} (timeout ${testTimeoutMin}m)`);
-      const pv = runTestCommand(story.test_command ?? testCommand, storyCwd, testTimeoutMs);
+      log(`post-merge verify on ${stagingBranch}: ${testCommand} (timeout ${testTimeoutMin}m)`);
+      const pv = runTestCommand(testCommand, storyCwd, testTimeoutMs);
       writeArtifact(paths.artifact(story.id, "postmerge-verify.output.log"), pv.output);
       if (!pv.ok) {
         const reverted = resetHard(preMerge, storyCwd);
