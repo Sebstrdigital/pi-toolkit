@@ -16,6 +16,8 @@ import {
   commitsOnBranch,
   diffBetween,
   headSha,
+  fetchBaseRef,
+  FetchError,
 } from "./git.js";
 import { runSandboxed } from "./sandbox.js";
 import { allowListedEnv } from "./env.js";
@@ -202,9 +204,13 @@ const ensureStagingBranch = (
   events: ReturnType<typeof createEventWriter>,
 ): void => {
   if (!branchExists(stagingBranch, cwd)) {
-    cutBranch(stagingBranch, storyBaseBranch, cwd);
-    events.emit({ type: "git", action: "cut_branch", branch: stagingBranch, fromBranch: storyBaseBranch });
-    log(`Cut staging from ${storyBaseBranch} in ${cwd}`);
+    // Fetch the base from origin FIRST so staging is cut from fresh remote code,
+    // not a stale local checkout (nettobrand#29). fetchBaseRef throws FetchError on
+    // a credential/network failure, which runStory turns into an infra park.
+    const fromRef = fetchBaseRef(storyBaseBranch, cwd);
+    cutBranch(stagingBranch, fromRef, cwd);
+    events.emit({ type: "git", action: "cut_branch", branch: stagingBranch, fromBranch: fromRef });
+    log(`Cut staging from ${fromRef} in ${cwd}`);
   } else {
     checkout(stagingBranch, cwd);
     events.emit({ type: "git", action: "checkout", branch: stagingBranch });
@@ -293,7 +299,23 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
   const acceptPath = join(acceptDir, `${story.id}.sh`);
   const storyCwd = resolveStoryCwd(ctx.repoCwd, story);
   const storyBaseBranch = story.base_branch ?? baseBranch;
-  ensureStagingBranch(stagingBranch, storyBaseBranch, storyCwd, events);
+  try {
+    ensureStagingBranch(stagingBranch, storyBaseBranch, storyCwd, events);
+  } catch (e) {
+    if (e instanceof FetchError) {
+      // A credential/network failure fetching the base — park with a clear infra
+      // reason (surfaced into the board comment) instead of building on a stale
+      // base. endStory isn't in scope yet, so terminate like the blockers path.
+      ss.status = "needs_human";
+      ss.failure_reason = `infra: ${e.message} — refused to build on a stale base; check the factory git credential/token for this repo`;
+      ss.ended_at = new Date().toISOString();
+      log(`PARK  ${story.id}: ${ss.failure_reason.split("\n")[0]}`);
+      events.emit({ type: "story_finished", storyId: story.id, status: "needs_human", failureReason: ss.failure_reason });
+      persist();
+      return;
+    }
+    throw e;
+  }
 
   // 1. Cut feature branch from staging, run worker (worker does NOT see acceptance criteria)
   events.emit({ type: "phase_started", storyId: story.id, phase: "staging", detail: `cut ${featureBranch}` });

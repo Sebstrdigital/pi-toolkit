@@ -14,6 +14,8 @@ import {
   localBranchHeads,
   resetToOrigHead,
   headSha,
+  fetchBaseRef,
+  FetchError,
 } from "../src/git.js";
 
 const git = (args: string[], cwd: string): string =>
@@ -111,5 +113,45 @@ describe("git merge safety", () => {
     expect(after.main).toBe(heads.main);
     expect(after.staging).toBe(heads.staging);
     expect(after.feature).not.toBe(heads.staging);
+  });
+});
+
+describe("fetchBaseRef (nettobrand#29 stale-base guard)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ptl-fetch-"));
+    git(["init", "-q", "-b", "main"], dir);
+    git(["config", "user.email", "t@t.t"], dir);
+    git(["config", "user.name", "t"], dir);
+    commit(dir, "base.txt", "base\n", "base");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("returns the local base when there is no origin remote (local-only repo)", () => {
+    expect(fetchBaseRef("main", dir)).toBe("main");
+  });
+
+  it("throws FetchError when the base cannot be fetched from origin (bad credential/URL)", () => {
+    git(["remote", "add", "origin", "file:///nonexistent/repo-does-not-exist.git"], dir);
+    expect(() => fetchBaseRef("main", dir)).toThrow(FetchError);
+  });
+
+  it("cuts staging from origin/<base> after a successful fetch", () => {
+    // Stand up a local 'remote' with an extra commit, so origin/main is AHEAD of local main.
+    const remote = mkdtempSync(join(tmpdir(), "ptl-remote-"));
+    git(["init", "-q", "-b", "main", "--bare"], remote);
+    git(["remote", "add", "origin", remote], dir);
+    git(["push", "-q", "origin", "main"], dir);
+    // advance the remote main via a second clone
+    const other = mkdtempSync(join(tmpdir(), "ptl-other-"));
+    git(["clone", "-q", remote, other], process.cwd());
+    git(["config", "user.email", "t@t.t"], other);
+    git(["config", "user.name", "t"], other);
+    commit(other, "remote.txt", "remote\n", "remote-ahead");
+    git(["push", "-q", "origin", "main"], other);
+    // local main is now behind; fetchBaseRef should point at the fresh origin/main
+    expect(fetchBaseRef("main", dir)).toBe("origin/main");
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(other, { recursive: true, force: true });
   });
 });
