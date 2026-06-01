@@ -60,7 +60,11 @@ const DENY_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /\bchmod\s+(-R\s+)?[0-7]*7[0-7]{2}\s+\//, reason: "world-writable on absolute path" },
   { re: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;/, reason: "fork bomb" },
   { re: /\b(npm|pnpm|yarn|pip|pip3|gem|cargo|go)\s+(install|i|add|publish)\b/, reason: "package install/publish (network + supply chain)" },
-  { re: />\s*\/(etc|usr|bin|sbin|boot|dev|sys|proc)\b/, reason: "write to a system path" },
+  { re: />\s*\/(etc|usr|bin|sbin|boot|sys|proc)\b/, reason: "write to a system path" },
+  // /dev writes are blocked EXCEPT the benign character-device sinks every shell
+  // script uses to discard or split output (`>/dev/null 2>&1`, `>/dev/stdout`).
+  // A write to a real device node (`>/dev/sda`) is still rejected.
+  { re: />\s*\/dev\/(?!(null|stdout|stderr|zero)\b)/, reason: "write to a device node" },
   { re: /\beval\s+["'`]?\$\(|\bbase64\s+(-d|--decode)\b/, reason: "obfuscated/dynamic execution" },
 ];
 
