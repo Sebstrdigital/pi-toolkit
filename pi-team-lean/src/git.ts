@@ -33,6 +33,37 @@ export const cutBranch = (newBranch: string, fromBranch: string, cwd: string): v
 export const branchExists = (branch: string, cwd: string): boolean =>
   tryGit(["rev-parse", "--verify", `refs/heads/${branch}`], cwd).ok;
 
+/**
+ * Thrown when the base branch cannot be fetched from origin (credential/network
+ * failure). The caller parks the story with a clear infra reason rather than
+ * silently building on a stale local base — the exact cascade that parked
+ * nettobrand#29 (the factory's git token was stripped, the nested submodule
+ * fetch failed with "Invalid username or token", and the Line built stale).
+ */
+export class FetchError extends Error {
+  constructor(
+    readonly baseBranch: string,
+    readonly detail: string,
+  ) {
+    super(`could not fetch '${baseBranch}' from origin: ${detail}`);
+    this.name = "FetchError";
+  }
+}
+
+/**
+ * Fetch `baseBranch` from origin so staging is cut from FRESH remote code, and
+ * return the ref to cut from. Throws FetchError on a fetch failure (so a
+ * credential/network problem parks loudly instead of building stale). Returns
+ * `origin/<base>` when the remote ref exists after fetching, else the local base
+ * (a repo with no `origin` remote — e.g. a local-only test repo — is left as-is).
+ */
+export const fetchBaseRef = (baseBranch: string, cwd: string): string => {
+  if (!tryGit(["remote", "get-url", "origin"], cwd).ok) return baseBranch;
+  const fetched = tryGit(["fetch", "origin", baseBranch], cwd);
+  if (!fetched.ok) throw new FetchError(baseBranch, fetched.out.trim().slice(-500));
+  return tryGit(["rev-parse", "--verify", `origin/${baseBranch}`], cwd).ok ? `origin/${baseBranch}` : baseBranch;
+};
+
 export const mergeNoFf = (sourceBranch: string, intoBranch: string, message: string, cwd: string): void => {
   git(["checkout", intoBranch], cwd);
   git(["merge", "--no-ff", "-m", message, sourceBranch], cwd);

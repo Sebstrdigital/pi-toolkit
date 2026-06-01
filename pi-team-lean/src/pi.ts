@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { allowListedEnv } from "./env.js";
 
 export interface PiResult {
   exitCode: number;
@@ -53,7 +54,14 @@ export const runPi = async (
   return new Promise((resolve, reject) => {
     // detached so the child leads its own process group → we can SIGTERM/SIGKILL
     // the whole tree on timeout instead of orphaning grandchildren.
-    const proc = spawn("pi", args, { cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    //
+    // Untrusted-agent boundary (this is where B1's secret containment belongs):
+    // worker/reviewer/qa-author Pi roles are prompt-injectable and never need the
+    // factory's GitHub token or other secrets (the harness does all git + tests).
+    // Spawn them with an allow-listed env — pi reads its model auth from
+    // ~/.pi/agent/auth.json (HOME is allow-listed), so this drops the token while
+    // keeping the toolchain. The HARNESS process keeps the token for its own git.
+    const proc = spawn("pi", args, { cwd, stdio: ["pipe", "pipe", "pipe"], detached: true, env: allowListedEnv() });
     let stdout = "";
     let stderr = "";
     let buf = "";
