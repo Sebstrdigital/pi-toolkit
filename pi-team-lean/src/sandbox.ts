@@ -130,7 +130,22 @@ export interface RunSandboxedOpts {
   image?: string;
   /** Force a mode (tests). When unset, auto-detects a container runtime. */
   forceMode?: SandboxMode;
+  /**
+   * Fail closed when no container runtime is available instead of falling back
+   * to the restricted shell. When true (or env `PI_REQUIRE_SANDBOX` is set) and
+   * no podman/docker is present, the script is NOT run on the host — the result
+   * is reported as rejected so the caller parks the story. Set this on the
+   * always-on factory box (which always has podman) so a misconfigured host can
+   * never silently downgrade untrusted-script isolation to a host shell.
+   */
+  requireContainer?: boolean;
 }
+
+/** Truthy-ish check for the PI_REQUIRE_SANDBOX env flag. */
+const envRequiresSandbox = (): boolean => {
+  const v = process.env.PI_REQUIRE_SANDBOX;
+  return v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false";
+};
 
 const runViaShell = (scriptPath: string, cwd: string, timeoutMs: number): { ok: boolean; output: string; timedOut: boolean } => {
   try {
@@ -216,11 +231,27 @@ export const runSandboxed = (script: string, opts: RunSandboxedOpts): SandboxRes
     };
   }
 
-  const runtime = opts.forceMode === "restricted-shell" ? null : detectRuntime();
-  if (runtime && opts.forceMode !== "restricted-shell") {
+  const wantShell = opts.forceMode === "restricted-shell";
+  const runtime = wantShell ? null : detectRuntime();
+  if (runtime) {
     const r = runViaContainer(runtime, opts.scriptPath, opts.cwd, opts.image ?? DEFAULT_SANDBOX_IMAGE, opts.timeoutMs);
     return { ok: r.ok, output: r.output, rejected: false, mode: "container", timedOut: r.timedOut };
   }
+
+  // No container runtime. Fail closed if the caller (or the box) requires real
+  // isolation — never silently run an untrusted script on the host shell.
+  if (!wantShell && (opts.requireContainer || envRequiresSandbox())) {
+    const reason = "no container runtime (podman/docker) available and sandboxing is required";
+    return {
+      ok: false,
+      rejected: true,
+      rejectReason: reason,
+      output: `[sandbox] FAIL-CLOSED — ${reason}; refusing to run the acceptance script on the host`,
+      mode: "restricted-shell",
+      timedOut: false,
+    };
+  }
+
   const r = runViaShell(opts.scriptPath, opts.cwd, opts.timeoutMs);
   return { ok: r.ok, output: r.output, rejected: false, mode: "restricted-shell", timedOut: r.timedOut };
 };

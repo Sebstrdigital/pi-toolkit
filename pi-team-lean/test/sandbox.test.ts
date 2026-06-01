@@ -69,6 +69,21 @@ describe("runSandboxed", () => {
     expect(existsSync(sentinel)).toBe(false);
   });
 
+  it("fails closed (rejected) when no container runtime and requireContainer is set", () => {
+    __setRuntimeForTest(null); // no podman/docker
+    dir = mkdtempSync(join(tmpdir(), "ptl-sbx-"));
+    const sentinel = join(dir, "sentinel");
+    const scriptPath = join(dir, "accept.sh");
+    const script = `#!/usr/bin/env bash\ntouch ${sentinel}\n`;
+    writeFileSync(scriptPath, script);
+    // requireContainer: true (NOT forceMode) — must refuse to run on the host.
+    const r = runSandboxed(script, { scriptPath, cwd: dir, timeoutMs: 5000, requireContainer: true });
+    expect(r.rejected).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.rejectReason).toMatch(/no container runtime/i);
+    expect(existsSync(sentinel)).toBe(false); // never executed on the host
+  });
+
   it("runs a benign script in the restricted shell and reports success", () => {
     __setRuntimeForTest(null); // force restricted-shell fallback
     dir = mkdtempSync(join(tmpdir(), "ptl-sbx-"));
