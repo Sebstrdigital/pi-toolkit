@@ -45,6 +45,21 @@ describe("screenAcceptanceScript (content gate)", () => {
     const r = screenAcceptanceScript(`#!/usr/bin/env bash\n# do not run rm -rf or git push\necho PASS\n`);
     expect(r.ok).toBe(true);
   });
+
+  it("allows the benign /dev sinks (>/dev/null, /dev/stdout, /dev/stderr)", () => {
+    // Regression: the qa-author routinely emits `>/dev/null 2>&1` to discard
+    // output. These must NOT trip the system-path gate (false-park of happy path).
+    expect(screenAcceptanceScript(`npx tsc --noEmit "$f" >/dev/null 2>&1\n`).ok).toBe(true);
+    expect(screenAcceptanceScript(`echo hi > /dev/null\n`).ok).toBe(true);
+    expect(screenAcceptanceScript(`echo hi >/dev/stdout\n`).ok).toBe(true);
+    expect(screenAcceptanceScript(`echo err >/dev/stderr\n`).ok).toBe(true);
+  });
+
+  it("still rejects a real /dev device-node write and other system-path writes", () => {
+    expect(screenAcceptanceScript(`echo x >/dev/sda\n`).ok).toBe(false);
+    expect(screenAcceptanceScript(`echo x > /etc/passwd\n`).ok).toBe(false);
+    expect(screenAcceptanceScript(`echo x >/usr/bin/foo\n`).ok).toBe(false);
+  });
 });
 
 describe("runSandboxed", () => {
