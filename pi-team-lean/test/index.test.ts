@@ -26,6 +26,28 @@ vi.mock("../src/pi.js", async () => {
   };
 });
 
+vi.mock("../src/sandbox.js", async () => {
+  const { execFileSync: execBash } = await import("node:child_process");
+  return {
+    runSandboxed: (_script: string, opts: { scriptPath: string; cwd: string; timeoutMs?: number }) => {
+      try {
+        const output = execBash("bash", [opts.scriptPath], {
+          cwd: opts.cwd,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: opts.timeoutMs,
+        });
+        return { ok: true, output, rejected: false, mode: "restricted-shell", timedOut: false };
+      } catch (e: unknown) {
+        const err = e as { stdout?: Buffer | string; stderr?: Buffer | string; signal?: string; code?: string };
+        const output = (err.stdout?.toString() ?? "") + (err.stderr?.toString() ?? "");
+        const timedOut = err.signal === "SIGTERM" || err.code === "ETIMEDOUT";
+        return { ok: false, output, rejected: false, mode: "restricted-shell", timedOut };
+      }
+    },
+  };
+});
+
 const git = (args: string[], cwd: string): string =>
   execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
