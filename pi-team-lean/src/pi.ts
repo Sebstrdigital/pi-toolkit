@@ -1,6 +1,27 @@
 import { spawn } from "node:child_process";
 import { allowListedEnv } from "./env.js";
 
+/**
+ * B3: hard cap on accumulated stdout/stderr per Pi invocation.
+ * A looping/chatty agent can emit gigabytes; this keeps the Line process from
+ * OOM-ing. We keep the TAIL (most recent output) because that is what the
+ * harness inspects for failures / feedback. 4 MB per stream is generous for any
+ * legitimate Pi run while still bounding memory to ~8 MB per active child.
+ */
+export const OUTPUT_CAP_BYTES = 4 * 1024 * 1024; // 4 MB
+
+/**
+ * Append `text` to `acc`, trimming the head when the result exceeds
+ * OUTPUT_CAP_BYTES so the tail (most recent output) is always preserved.
+ * Exported for unit testing only.
+ */
+export const appendCapped = (acc: string, text: string): string => {
+  const next = acc + text;
+  if (next.length <= OUTPUT_CAP_BYTES) return next;
+  // Keep most-recent OUTPUT_CAP_BYTES characters.
+  return next.slice(next.length - OUTPUT_CAP_BYTES);
+};
+
 export interface PiResult {
   exitCode: number;
   stdout: string;
@@ -40,6 +61,31 @@ const signalTree = (proc: ReturnType<typeof spawn>, sig: NodeJS.Signals): void =
   }
 };
 
+/**
+ * B4: Track every active Pi child so the SIGTERM handler can reap them on
+ * Foreman / systemctl stop. The set is module-level; the handler is registered
+ * once (guarded by the flag below).
+ */
+const activeProcs: Set<ReturnType<typeof spawn>> = new Set();
+let sigtermHandlerInstalled = false;
+
+const installSigtermHandler = (): void => {
+  if (sigtermHandlerInstalled) return;
+  sigtermHandlerInstalled = true;
+  process.on("SIGTERM", () => {
+    // Kill every in-flight Pi process group, then exit with the conventional
+    // SIGTERM exit code (128 + 15 = 143) so the process manager sees a clean
+    // signal-induced shutdown rather than an unhandled exception.
+    for (const p of activeProcs) {
+      signalTree(p, "SIGTERM");
+    }
+    process.exit(143);
+  });
+};
+
+/** Testing only — exposes the active-proc set size for assertions. */
+export const __activeProcsSize = (): number => activeProcs.size;
+
 export const runPi = async (
   prompt: string,
   cwd: string,
@@ -48,6 +94,7 @@ export const runPi = async (
   options?: RunPiOptions,
   onStderrLine?: (line: string) => void,
 ): Promise<PiResult> => {
+  installSigtermHandler();
   const args = ["-p", "--no-session", "--mode", "text"];
   if (model) args.push("--model", model);
 
@@ -62,6 +109,7 @@ export const runPi = async (
     // ~/.pi/agent/auth.json (HOME is allow-listed), so this drops the token while
     // keeping the toolchain. The HARNESS process keeps the token for its own git.
     const proc = spawn("pi", args, { cwd, stdio: ["pipe", "pipe", "pipe"], detached: true, env: allowListedEnv() });
+    activeProcs.add(proc);
     let stdout = "";
     let stderr = "";
     let buf = "";
@@ -87,7 +135,7 @@ export const runPi = async (
 
     proc.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
-      stdout += text;
+      stdout = appendCapped(stdout, text);
       if (onStdoutLine) {
         buf += text;
         const lines = buf.split("\n");
@@ -97,7 +145,7 @@ export const runPi = async (
     });
     proc.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
-      stderr += text;
+      stderr = appendCapped(stderr, text);
       if (onStderrLine) {
         errBuf += text;
         const lines = errBuf.split("\n");
@@ -108,11 +156,13 @@ export const runPi = async (
     proc.on("error", (err) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (killTimer) clearTimeout(killTimer);
+      activeProcs.delete(proc);
       reject(err);
     });
     proc.on("close", (code, signal) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (killTimer) clearTimeout(killTimer);
+      activeProcs.delete(proc);
       if (onStdoutLine && buf) onStdoutLine(buf);
       if (onStderrLine && errBuf) onStderrLine(errBuf);
       const exitCode = code ?? (signal ? 124 : 0);
