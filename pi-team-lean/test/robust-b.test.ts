@@ -3,6 +3,7 @@
  *
  * B1: story.test_command is never passed to the worker prompt or runTestCommand.
  * B3: pi.ts output cap — appendCapped keeps the tail and never exceeds OUTPUT_CAP_BYTES.
+ * Tier-0: workerHomeOverride — minimal-HOME confinement helper (no pi spawn, no real fs).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -10,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendCapped, OUTPUT_CAP_BYTES } from "../src/pi.js";
+import { appendCapped, OUTPUT_CAP_BYTES, workerHomeOverride } from "../src/pi.js";
 import type { Sprint } from "../src/types.js";
 
 // ─── B3: output cap unit tests ────────────────────────────────────────────────
@@ -122,4 +123,38 @@ describe("B1: story.test_command ignored", () => {
     // It MUST contain the sprint-level testCommand.
     expect(workerPromptText).toContain("npm test");
   }, 20_000);
+});
+
+// ─── Tier-0: workerHomeOverride (pure — no real fs, no pi spawn) ──────────────
+//
+// Verifies the 3 cases of the Tier-0 minimal-HOME confinement helper:
+//   1. PI_WORKER_HOME set + dir exists  → returns the path (confinement active)
+//   2. PI_WORKER_HOME set + dir missing → returns undefined (defensive fallback)
+//   3. PI_WORKER_HOME unset             → returns undefined (no confinement)
+
+describe("Tier-0 workerHomeOverride", () => {
+  it("returns the path when PI_WORKER_HOME is set and the dir exists", () => {
+    const fakePath = "/home/factory/.factory-worker-home";
+    const result = workerHomeOverride(
+      { PI_WORKER_HOME: fakePath },
+      (p) => p === fakePath,
+    );
+    expect(result).toBe(fakePath);
+  });
+
+  it("returns undefined when PI_WORKER_HOME is set but the dir does NOT exist (defensive fallback)", () => {
+    const result = workerHomeOverride(
+      { PI_WORKER_HOME: "/home/factory/.factory-worker-home" },
+      () => false,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it("returns undefined when PI_WORKER_HOME is not set", () => {
+    const result = workerHomeOverride(
+      {},
+      () => { throw new Error("exists must not be called when PI_WORKER_HOME is unset"); },
+    );
+    expect(result).toBeUndefined();
+  });
 });

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { allowListedEnv } from "./env.js";
 
 /**
@@ -86,6 +87,33 @@ const installSigtermHandler = (): void => {
 /** Testing only — exposes the active-proc set size for assertions. */
 export const __activeProcsSize = (): number => activeProcs.size;
 
+/**
+ * Tier-0 worker-home confinement — redirects $HOME for the prompt-injectable
+ * worker/reviewer pi to a minimal home (only pi config/auth + git identity
+ * symlinked) so its ~/-relative credential/config lookups (ssh keys, cloud creds,
+ * shell history, other dotfile secrets) resolve there instead of the factory
+ * user's real home. NOTE: a HOME redirect, NOT a filesystem jail — the pi still
+ * runs as the factory user and can read absolute paths it has permission for
+ * (other projects' repos, etc.). General FS confinement = Tier 1 (container, future).
+ *
+ * Pure helper: injectable `env` + `exists` fn so unit tests can exercise all 3
+ * cases without touching the real filesystem or spawning pi.
+ *
+ * Returns the minimal HOME to use, or `undefined` to keep the inherited HOME.
+ * Defensive fallback: if PI_WORKER_HOME is set but the dir does NOT exist, return
+ * undefined (never brick every run due to a misconfigured path). The caller
+ * (runPi) is responsible for emitting the stderr warning in that case.
+ */
+export const workerHomeOverride = (
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (p: string) => boolean = existsSync,
+): string | undefined => {
+  const val = env.PI_WORKER_HOME;
+  if (!val) return undefined;
+  if (exists(val)) return val;
+  return undefined;
+};
+
 export const runPi = async (
   prompt: string,
   cwd: string,
@@ -98,6 +126,22 @@ export const runPi = async (
   const args = ["-p", "--no-session", "--mode", "text"];
   if (model) args.push("--model", model);
 
+  // Tier-0 worker-home confinement: redirect HOME to the minimal worker home so
+  // the prompt-injectable worker/reviewer pi's ~/-relative credential lookups (ssh
+  // keys, cloud creds, dotfile secrets) don't resolve into the factory user's real
+  // home. NOT a filesystem jail (absolute-path reads still work as the factory
+  // user) — that's Tier 1. Falls back to inherited HOME with a stderr warning if
+  // the configured dir is missing, so a misconfiguration never silently bricks runs.
+  const spawnEnv = allowListedEnv();
+  const overrideHome = workerHomeOverride();
+  if (overrideHome) {
+    spawnEnv.HOME = overrideHome;
+  } else if (process.env.PI_WORKER_HOME) {
+    process.stderr.write(
+      `[pi-team-lean] PI_WORKER_HOME=${process.env.PI_WORKER_HOME} does not exist — falling back to inherited HOME\n`,
+    );
+  }
+
   return new Promise((resolve, reject) => {
     // detached so the child leads its own process group → we can SIGTERM/SIGKILL
     // the whole tree on timeout instead of orphaning grandchildren.
@@ -106,9 +150,10 @@ export const runPi = async (
     // worker/reviewer/qa-author Pi roles are prompt-injectable and never need the
     // factory's GitHub token or other secrets (the harness does all git + tests).
     // Spawn them with an allow-listed env — pi reads its model auth from
-    // ~/.pi/agent/auth.json (HOME is allow-listed), so this drops the token while
+    // $HOME/.pi/agent/auth.json (HOME is allow-listed; Tier-0 confinement above
+    // points HOME at the minimal worker home), so this drops the token while
     // keeping the toolchain. The HARNESS process keeps the token for its own git.
-    const proc = spawn("pi", args, { cwd, stdio: ["pipe", "pipe", "pipe"], detached: true, env: allowListedEnv() });
+    const proc = spawn("pi", args, { cwd, stdio: ["pipe", "pipe", "pipe"], detached: true, env: spawnEnv });
     activeProcs.add(proc);
     let stdout = "";
     let stderr = "";
