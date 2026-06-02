@@ -121,8 +121,6 @@ const AGENTS: Array<{ phase: TeamLeanPhase; label: string }> = [
   { phase: "worker", label: "Worker" },
   { phase: "reviewer", label: "Reviewer" },
   { phase: "verify", label: "Verifier" },
-  { phase: "qa-script", label: "QA Script" },
-  { phase: "acceptance", label: "Acceptance" },
   { phase: "scenario-judge", label: "Judge" },
 ];
 
@@ -186,7 +184,6 @@ const eventLabel = (e: TeamLeanEvent): string => {
     case "degraded_gate": return `${time} ${color.red("GATE DEGRADED")} ${e.storyId} ${e.gate} — ${e.reason}`;
     case "diff_truncated": return `${time} ${color.yellow("diff truncated")} ${e.storyId} ${e.phase} (${e.omitted} bytes omitted)`;
     case "no_progress": return `${time} ${color.yellow("no progress")} ${e.storyId} iter ${e.iteration} (${e.signature})`;
-    case "sandbox_rejected": return `${time} ${color.red("SANDBOX REJECTED")} ${e.storyId} — ${e.reason}`;
     case "postmerge_verify": return `${time} ${e.ok ? color.green("post-merge ok") : color.red("post-merge FAIL")} ${e.storyId}${e.reverted ? " (reverted)" : ""}`;
   }
 };

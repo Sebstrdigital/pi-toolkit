@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { relative, join, resolve } from "node:path";
 import { runPi } from "./pi.js";
-import { qaScriptPrompt, workerPrompt } from "./prompts.js";
+import { workerPrompt } from "./prompts.js";
 import {
   ensureCleanTree,
   cutBranch,
@@ -19,7 +19,6 @@ import {
   fetchBaseRef,
   FetchError,
 } from "./git.js";
-import { runSandboxed } from "./sandbox.js";
 import { allowListedEnv } from "./env.js";
 import { runPaths, writeArtifact, writeJsonArtifact, writeFileAtomic, ARTIFACTS } from "./runs.js";
 import { createEventWriter } from "./events.js";
@@ -31,7 +30,6 @@ import { cliPreflight } from "./preflight.js";
 import type { Sprint, SprintState, StoryState, Story, StoryStatus } from "./types.js";
 
 const DEFAULT_WORKER_TIMEOUT_MIN = 15;
-const DEFAULT_QA_TIMEOUT_MIN = 10;
 const DEFAULT_TEST_TIMEOUT_MIN = 30;
 
 const log = (msg: string): void => console.log(`[pi-team-lean] ${msg}`);
@@ -56,16 +54,6 @@ ${output.slice(-4000)}
 \`\`\`
 
 Do not weaken, skip, or delete tests to make them pass. Commit with: \`git add -A && git commit -m "fix: address failing tests"\``;
-
-const acceptanceFailureFeedback = (output: string): string => `# Acceptance failure feedback
-
-The implementation passed unit tests but FAILED the acceptance checks below. The acceptance script encodes the story's intent — make the behaviour satisfy it. Fix and commit again.
-
-\`\`\`
-${output.slice(-4000)}
-\`\`\`
-
-Do not edit the acceptance script — fix the implementation. Commit with: \`git add -A && git commit -m "fix: satisfy acceptance checks"\``;
 
 const topoSort = (stories: Story[]): Story[] => {
   const byId = new Map(stories.map((s) => [s.id, s]));
@@ -230,7 +218,6 @@ export interface RunContext {
   stagingBranch: string;
   runId: string;
   testCommand: string;
-  acceptDir: string;
   paths: ReturnType<typeof runPaths>;
   events: ReturnType<typeof createEventWriter>;
   state: SprintState;
@@ -240,7 +227,7 @@ export interface RunContext {
 
 /**
  * Run a single story end-to-end on its own feature branch: worker (+ optional
- * reviewer loop) → verify → qa-script → acceptance → scenario-judge → merge.
+ * reviewer loop) → verify → scenario-judge → merge.
  * Mutates ctx.state for this story and persists; returns when the story reaches
  * a terminal state (merged / failed / skipped). Does not throw on story failure.
  */
@@ -297,14 +284,6 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
 
   paths.storyDir(story.id);
   const storyCwd = resolveStoryCwd(ctx.repoCwd, story);
-  // B2: acceptance script must live INSIDE storyCwd so it is visible inside the
-  // container at /work/.pi-team-lean/acceptance/<id>.sh — the container mounts
-  // storyCwd (not repoCwd) at /work. For wrapper stories (repo_path set) this
-  // directory differs from the repoCwd-based acceptDir in ctx, so we compute the
-  // path relative to storyCwd every time.
-  const storyAcceptDir = join(storyCwd, ".pi-team-lean", "acceptance");
-  mkdirSync(storyAcceptDir, { recursive: true });
-  const acceptPath = join(storyAcceptDir, `${story.id}.sh`);
   const storyBaseBranch = story.base_branch ?? baseBranch;
   try {
     ensureStagingBranch(stagingBranch, storyBaseBranch, storyCwd, events);
@@ -339,7 +318,6 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
     worker: sprint.retry_on?.worker ?? true,
     reviewer: sprint.retry_on?.reviewer ?? true,
     test: sprint.retry_on?.test ?? true,
-    acceptance: sprint.retry_on?.acceptance ?? true,
   };
 
   /** Terminal exit for a story: restore staging, record status, emit, persist. */
@@ -397,7 +375,7 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
   // escaped scope (or pushed/merged) and the story must be parked, not merged.
   const branchHeadsBeforeWorker = localBranchHeads(storyCwd);
 
-  // Bounded delivery loop: worker → reviewer → verify → acceptance. Any phase
+  // Bounded delivery loop: worker → reviewer → verify. Any phase
   // failure (with budget + retry enabled) feeds typed feedback back to the next
   // worker attempt; on cap-exceed the story parks as needs_human (never a silent
   // merge). A phase whose retry toggle is off fails hard instead of parking.
@@ -563,81 +541,7 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       return endStory(retry.test ? "needs_human" : "failed", `test_command failed after ${iter} iteration(s):\n${t.output.slice(-1500)}`);
     }
 
-    // 4. Generate qa-script with diff visibility, then run it
-    log(`qa-script: drafting (diff-aware)`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "qa-script", detail: "drafting acceptance script" });
-    const qa = await runPi(
-      qaScriptPrompt(story, workerDiff),
-      storyCwd,
-      sprint.qa_model,
-      (line) => {
-        if (line.trim()) events.emit({ type: "pi_stdout", storyId: story.id, phase: "qa-script", line });
-      },
-      { timeoutMs: DEFAULT_QA_TIMEOUT_MIN * 60 * 1000 },
-      (line) => {
-        if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "qa-script", line });
-      },
-    );
-    if (qa.exitCode !== 0 || !qa.stdout.trim()) {
-      const reason = qa.timedOut
-        ? `qa-script author timed out after ${DEFAULT_QA_TIMEOUT_MIN}m`
-        : `qa-script author failed (exit ${qa.exitCode})\n${qa.stderr.slice(0, 500)}`;
-      events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: false, detail: reason });
-      // qa-author is harness INFRASTRUCTURE, not the worker's code. The worker
-      // already produced a reviewed, test-passing commit — don't discard it as a
-      // hard failure. Park for a human to re-run the gate (qa-author-fail-hard-not-park).
-      return endStory("needs_human", `qa-author gate could not run (work is salvageable): ${reason}`);
-    }
-    writeFileSync(acceptPath, qa.stdout);
-    chmodSync(acceptPath, 0o755);
-    const qaScriptPath = paths.artifact(story.id, ARTIFACTS.qaScript);
-    writeArtifact(qaScriptPath, qa.stdout);
-    emitArtifact(story.id, ARTIFACTS.qaScript, qaScriptPath);
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "qa-script", ok: true, detail: acceptPath });
-
-    log(`accept: ${acceptPath} (sandboxed)`);
-    events.emit({ type: "phase_started", storyId: story.id, phase: "acceptance", detail: acceptPath });
-    // The acceptance script is LLM-authored from an untrusted story body + diff
-    // (qa-script-arbitrary-exec). Run it through the content gate + isolation
-    // sandbox instead of chmod+exec on the host with full env.
-    const sandboxResult = runSandboxed(qa.stdout, {
-      scriptPath: acceptPath,
-      cwd: storyCwd,
-      timeoutMs: DEFAULT_QA_TIMEOUT_MIN * 60 * 1000,
-    });
-    if (sandboxResult.rejected) {
-      // A dangerous construct (rm -rf / push / network) was found — never executed.
-      // This is a prompt-injection / untrusted-output event: park for a human.
-      events.emit({ type: "sandbox_rejected", storyId: story.id, reason: sandboxResult.rejectReason ?? "content gate" });
-      events.emit({ type: "phase_finished", storyId: story.id, phase: "acceptance", ok: false, detail: `rejected: ${sandboxResult.rejectReason}` });
-      writeArtifact(paths.artifact(story.id, ARTIFACTS.qaScriptOutput), sandboxResult.output);
-      return endStory("needs_human", `acceptance script rejected by content gate: ${sandboxResult.rejectReason}`);
-    }
-    log(`accept: ran in ${sandboxResult.mode} sandbox`);
-    const a = { ok: sandboxResult.ok, output: sandboxResult.output };
-    const qaOutputPath = paths.artifact(story.id, ARTIFACTS.qaScriptOutput);
-    writeArtifact(qaOutputPath, a.output);
-    emitArtifact(story.id, ARTIFACTS.qaScriptOutput, qaOutputPath);
-    events.emit({ type: "test_output", storyId: story.id, phase: "acceptance", ok: a.ok, tail: a.output.split("\n").slice(-80).join("\n") });
-    events.emit({ type: "phase_finished", storyId: story.id, phase: "acceptance", ok: a.ok, detail: a.ok ? "acceptance passed" : "acceptance failed" });
-    if (!a.ok) {
-      if (sprint.acceptance_advisory) {
-        // Advisory: per-story code-level acceptance is the wrong altitude (see
-        // dua-factory docs/QA-AUTHOR.md). Warn and proceed — like scenario-judge —
-        // rather than feeding back or parking. Real behavioural acceptance lives at
-        // the feature boundary (B2). verify + reviewer remain the blocking gates.
-        log(`WARN  ${story.id}: acceptance failed (advisory) — proceeding`);
-      } else if (retry.acceptance && iter < maxIter) {
-        if (stuckOnSameFailure("acceptance", iter, a.output)) return;
-        feedback = accumulateFeedback(feedback, acceptanceFailureFeedback(a.output), iter);
-        noteRetry("acceptance", iter);
-        continue;
-      } else {
-        return endStory(retry.acceptance ? "needs_human" : "failed", `acceptance failed after ${iter} iteration(s):\n${a.output.slice(-1500)}`);
-      }
-    }
-
-    // 5. Scenario-judge (lenient: warn but don't block)
+    // 4. Scenario-judge (lenient: warn but don't block)
     const scenarios = scenariosForStory(sprint.feature_path, story.id, story.feature_story_id);
     if (scenarios.length > 0) {
       log(`judge: ${scenarios.length} scenarios via 3-judge majority`);
@@ -674,7 +578,7 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       log(`judge: no scenarios found for ${story.id} in ${sprint.feature_path}`);
     }
 
-    // 6. Merge feature → staging — story is green and reviewed.
+    // 5. Merge feature → staging — story is green and reviewed.
     // A merge conflict against staging is an EXPECTED per-story terminal state
     // (overlapping edits with an earlier merged story), never sprint-fatal. The
     // previous bare mergeNoFf threw to process.exit(1) and left staging in a
@@ -755,8 +659,6 @@ export const runSprint = async (sprint: Sprint, opts: RunSprintOptions): Promise
   const runId = sprint.staging_branch ? branchRunId(sprint.staging_branch) : `${Date.now()}`;
   const stagingBranch = sprint.staging_branch ?? `pi-team-lean/${runId}/staging`;
   const testCommand = sprint.test_command ?? "npm test";
-  const stateDir = join(repoCwd, ".pi-team-lean");
-  const acceptDir = join(stateDir, "acceptance");
   const paths = runPaths(repoCwd, runId);
   const statePath = paths.state;
   const events = createEventWriter(paths.events);
@@ -768,7 +670,6 @@ export const runSprint = async (sprint: Sprint, opts: RunSprintOptions): Promise
   for (const storyCwd of storyCwds) {
     if (storyCwd !== repoCwd) ensureCleanTree(storyCwd);
   }
-  mkdirSync(acceptDir, { recursive: true });
   mkdirSync(paths.root, { recursive: true });
   events.emit({
     type: "run_started",
@@ -813,7 +714,6 @@ export const runSprint = async (sprint: Sprint, opts: RunSprintOptions): Promise
     stagingBranch,
     runId,
     testCommand,
-    acceptDir,
     paths,
     events,
     state,

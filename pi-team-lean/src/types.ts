@@ -16,19 +16,10 @@ export interface Sprint {
   staging_branch?: string;
   test_command?: string;
   worker_model?: string;
-  qa_model?: string;
   judge_model?: string;
   reviewer_model?: string;
   feature_path?: string;
   enable_reviewer?: boolean;
-  /**
-   * When true, a failed acceptance script logs a warning and proceeds instead of
-   * feeding back / parking — the per-story qa-author gate becomes advisory (like
-   * scenario-judge). Unset = blocking (current behavior; takt unaffected).
-   * See dua-factory docs/QA-AUTHOR.md for why per-story code-level acceptance is
-   * the wrong altitude pending the validation-chain redesign.
-   */
-  acceptance_advisory?: boolean;
   /**
    * When true, skip the post-merge re-verification of the test command on
    * staging. Default (unset) runs the test command on the merged staging branch
@@ -39,14 +30,13 @@ export interface Sprint {
   skip_postmerge_verify?: boolean;
   /** Deprecated alias for max_iterations (reviewer-only cap); still honored as a fallback. */
   max_review_iterations?: number;
-  /** Overall bounded-retry cap for the delivery loop (worker → reviewer → verify → acceptance). Default 3. */
+  /** Overall bounded-retry cap for the delivery loop (worker → reviewer → verify). Default 3. */
   max_iterations?: number;
   /** Per-phase retry toggles; each defaults to true. A disabled phase fails hard instead of parking. */
   retry_on?: {
     worker?: boolean;
     reviewer?: boolean;
     test?: boolean;
-    acceptance?: boolean;
   };
   worker_timeout_min?: number;
   test_timeout_min?: number;

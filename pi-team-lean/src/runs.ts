@@ -58,8 +58,6 @@ export const ARTIFACTS = {
   workerStderr: "worker.stderr.log",
   workerDiff: "worker.diff",
   qaSpec: "qa-spec.yml",
-  qaScript: "qa-script.sh",
-  qaScriptOutput: "qa-script.output.log",
   testCommandOutput: "test-command.output.log",
   scenarioJudgement: "scenario-judgement.json",
   reviewerJudgement: "reviewer-judgement.json",

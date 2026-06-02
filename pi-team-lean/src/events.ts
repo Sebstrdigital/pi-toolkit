@@ -8,8 +8,6 @@ export type TeamLeanPhase =
   | "worker"
   | "reviewer"
   | "verify"
-  | "qa-script"
-  | "acceptance"
   | "scenario-judge"
   | "merge";
 
@@ -25,17 +23,15 @@ export type TeamLeanEvent =
   | { type: "phase_finished"; timestamp: string; storyId?: string; phase: TeamLeanPhase; ok: boolean; detail?: string; iteration?: number }
   | { type: "pi_stdout"; timestamp: string; storyId: string; phase: TeamLeanPhase; line: string; iteration?: number }
   | { type: "pi_stderr"; timestamp: string; storyId: string; phase: TeamLeanPhase; line: string; iteration?: number }
-  | { type: "test_output"; timestamp: string; storyId: string; phase: "verify" | "acceptance"; ok: boolean; tail: string }
+  | { type: "test_output"; timestamp: string; storyId: string; phase: "verify"; ok: boolean; tail: string }
   | { type: "artifact_written"; timestamp: string; storyId: string; name: string; path: string }
   | { type: "git"; timestamp: string; action: "cut_branch" | "checkout" | "merge" | "merge_abort" | "merge_revert" | "delete_branch"; branch?: string; fromBranch?: string; intoBranch?: string; message?: string }
   /** A safety gate (reviewer / scenario-judge) degraded to a fail-closed verdict due to infrastructure failure, NOT a real review. */
   | { type: "degraded_gate"; timestamp: string; storyId: string; gate: "reviewer" | "scenario-judge"; reason: string }
-  /** A diff was truncated before being shown to a gate/qa-author — recorded so the blind spot is auditable. */
+  /** A diff was truncated before being shown to a gate — recorded so the blind spot is auditable. */
   | { type: "diff_truncated"; timestamp: string; storyId: string; phase: TeamLeanPhase; omitted: number; cap: number }
   /** The bounded-retry loop made no progress between iterations (identical diff/failure signature) — parking. */
   | { type: "no_progress"; timestamp: string; storyId: string; iteration: number; signature: string }
-  /** The qa-author acceptance script was rejected by the pre-exec content gate (never executed). */
-  | { type: "sandbox_rejected"; timestamp: string; storyId: string; reason: string }
   /** Post-merge verification on staging (re-run of the test command after merge). */
   | { type: "postmerge_verify"; timestamp: string; storyId: string; ok: boolean; reverted: boolean };
 
