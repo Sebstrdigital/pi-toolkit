@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { relative, join, resolve } from "node:path";
-import { runPi } from "./pi.js";
+import { runPi, SandboxLaunchError, type PiResult } from "./pi.js";
 import { workerPrompt } from "./prompts.js";
 import {
   ensureCleanTree,
@@ -395,21 +395,38 @@ export const runStory = async (story: Story, ctx: RunContext): Promise<void> => 
       totalIterations: maxIter,
       detail: `${featureBranch}, timeout ${timeoutMin}m`,
     });
-    const w = await runPi(
-      workerPrompt(story, "", testCommand, feedback),
-      storyCwd,
-      sprint.worker_model,
-      (line) => {
-        if (line.trim()) {
-          console.log(`  pi> ${line}`);
-          events.emit({ type: "pi_stdout", storyId: story.id, phase: "worker", line, iteration: iter });
-        }
-      },
-      { timeoutMs },
-      (line) => {
-        if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "worker", line, iteration: iter });
-      },
-    );
+    let w: PiResult;
+    try {
+      w = await runPi(
+        workerPrompt(story, "", testCommand, feedback),
+        storyCwd,
+        sprint.worker_model,
+        (line) => {
+          if (line.trim()) {
+            console.log(`  pi> ${line}`);
+            events.emit({ type: "pi_stdout", storyId: story.id, phase: "worker", line, iteration: iter });
+          }
+        },
+        { timeoutMs },
+        (line) => {
+          if (line.trim()) events.emit({ type: "pi_stderr", storyId: story.id, phase: "worker", line, iteration: iter });
+        },
+      );
+    } catch (e) {
+      // ADR 0011 fail-closed: a SandboxLaunchError means the worker SANDBOX could
+      // not start (podman missing / refused / network/image absent). Park as infra
+      // (mirrors the FetchError stale-base park above) — TERMINAL, never retried and
+      // NEVER falling back to an unsandboxed worker run. Any other throw is a real
+      // bug and propagates (crash → the foreman's no-run-state infra park).
+      if (e instanceof SandboxLaunchError) {
+        const reason =
+          `infra: ${e.message} — refused to run the worker unsandboxed; ` +
+          `check the sandbox network/proxy/image on the validation host` +
+          (e.detail ? `\n${e.detail.slice(-500)}` : "");
+        return endStory("needs_human", reason);
+      }
+      throw e;
+    }
     const workerIterStdout = paths.artifact(story.id, `worker.iter${iter}.stdout.log`);
     const workerIterStderr = paths.artifact(story.id, `worker.iter${iter}.stderr.log`);
     const workerStdout = paths.artifact(story.id, ARTIFACTS.workerStdout);
