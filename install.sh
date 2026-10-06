@@ -16,8 +16,9 @@ link() {
   ln -s "$source" "$target"
 }
 
-mkdir -p "$agent/skills"
+mkdir -p "$agent/skills" "$agent/extensions"
 link "$root/agent/AGENTS.md" "$agent/AGENTS.md"
-for name in debug grill-me zoom-out duadigital-pdf-maker homelab-validation; do
+for name in debug grill-me zoom-out duadigital-pdf-maker homelab-validation delivery; do
   link "$root/skills/$name" "$agent/skills/$name"
 done
+link "$root/extensions/delivery-worker" "$agent/extensions/delivery-worker"
