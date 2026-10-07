@@ -1,16 +1,17 @@
 # Minimal Pi Delivery Workflow
 
-Status: implemented and accepted on 2026-10-06. The user considers the
-installed progress widget okay for now. Further expansion is deferred.
+The default one-shot workflow was accepted on 2026-10-06; its progress widget
+remains unchanged. Repository-owned tmux integration is explicit opt-in;
+independent review, installation/reload, and live acceptance are separate gates.
 
 ## Goal
 
 Support everyday delivery: discuss a change, investigate it, approve a
 concrete plan, then execute autonomously within that scope.
 
-Use sequential one-shot JSON workers with observed progress in the
-coordinator's terminal. Interactive worker terminals/background dispatch
-remain deferred until the planning contract and quality gates work on real tasks.
+Use sequential one-shot JSON workers by default, with observed progress in the
+coordinator's terminal. An explicitly approved visible-tmux mode is available
+through the narrow delivery adapter; the current session still coordinates.
 
 ## Roles and resources
 
@@ -158,18 +159,56 @@ Independent review approved the feature. These tests are not a real terminal
 smoke test. The user's subsequent feedback is that the widget is okay for now;
 no further widget work is planned.
 
-## Later: interactive subagents
+## Explicit opt-in visible tmux mode
 
-Before building more subagent infrastructure, inspect https://pi.dev/packages
-for current community extensions. A community subagent extension may be a
-better fit than expanding the custom launcher. No package has been selected.
+Install only after approval: `bash install.sh --with-delivery-tmux`, then reload
+Pi inside tmux. Default installation and the one-shot fallback stay unchanged.
+The installer refuses conflicting files, directories and links (including
+broken links), and never edits settings. Keep the checkout in place. Never
+install the vendor's generic entry point. Existing control-name collisions
+refuse adapter startup before vendor ownership/abort/reload initialization.
 
-pi-interactive-subagents is an existing candidate for visible tmux workers,
-asynchronous dispatch, parent questions, and explicitly bounded nesting;
-compare it with current catalog alternatives before deciding.
+The current lead runs one builder -> one validator -> one independent reviewer.
+Use only `subagent`, `subagent_message`, `subagents_list`, registered model-only
+and sequentially at session startup. A synchronous reservation prevents sibling
+launches; running/paused/waiting states retain the slot. Terminal completion
+allows another role, not automatic acceptance or automatic scheduling.
 
-Keep the same roles and contracts. Audit isolation, cancellation, resume,
-and integration ownership before enabling concurrent implementation.
+Fixed bundled roles ignore project/global profiles. Builder grants are
+read/grep/find/ls/bash/edit/write/ask_question; validator grants are
+read/grep/find/ls/bash/ask_question; reviewer grants are read/grep/find/ls/
+ask_question. Only child control loads, with extensions/MCP/skills/templates/
+themes/context discovery denied. Supply applicable rules and resources in the
+packet. Model/thinking selection is permitted without grants widening; cwd is
+the current project. No generic launch command, custom agents, alternate CLI,
+nesting or parallel writers. These limits are not an OS/filesystem sandbox:
+bash can mutate files and inspection tools are not path-confined.
+
+Reports and correlated questions arrive automatically, not through lead polling.
+Answer using exact name/runId/questionId. Pause preserves the owned pane/session;
+a matching reply releases waiting but not the interruption latch. Reconcile
+files/evidence, then rearm with explicit new work. Stop and the fixed 20-minute
+per-worker trial timeout cancel and never report success. Supported configured
+child keyboard interruption is covered; arbitrary third-party aborts are not.
+Shutdown/reload closes only owned panes and retries failed closes, idempotently;
+no automatic parent-window retile. Reload state is isolated from other upstream
+installations. A crash can leave unresolved ownership: fail closed, reconcile,
+and obtain approval before destructive cleanup rather than assuming exit.
+
+Saved resume is restricted to versioned adapter ownership in this lead's branch
+and unchanged pinned role/tools/model/thinking/identity/paths/resource denials.
+Old/malformed/changed metadata and external registry adoption are refused.
+Saved follow-up is not independent review. Inspect sessions, sidecars, scripts,
+actual changes and exact command results; bounded notifications are not the full
+evidence. Evidence may be sensitive. Keep at most two focused fix cycles and
+fresh independent re-review. The lead alone explicitly accepts after all gates
+and owned-resource reconciliation; worker completion never accepts the task.
+
+Use Munin recall/remember under the git-root name for decisions, outcomes and
+resumable handoffs (task/attempt, approval, revision/evidence, owned resources,
+remaining gates, next action; no secrets). Do not ask users to copy worker
+prompts. Portable repository tests use fake HOME/tmux and the installed loader,
+not live panes/provider workers; live acceptance remains a separate gate.
 
 ## References
 
@@ -183,5 +222,7 @@ and integration ownership before enabling concurrent implementation.
 - Interactive execution candidate:
   https://github.com/amosblomqvist/pi-interactive-subagents
 
-The existing workflows and candidate README were inspected.
-The candidate implementation and TAKT runner have not yet been audited.
+The selected runtime is pinned and narrowly vendored; accepted corrections,
+startup ownership correction, integration deltas and hashes are documented in
+`vendor/pi-interactive-subagents/PROVENANCE.md`. This does not imply an OS
+sandbox, universal abort guarantee, or broader upstream security certification.

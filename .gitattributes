@@ -1,0 +1,2 @@
+# Preserve this historical unified diff byte-for-byte; blank context lines carry a space.
+vendor/pi-interactive-subagents/provenance/accepted-cumulative.patch whitespace=-blank-at-eol

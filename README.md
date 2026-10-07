@@ -9,7 +9,9 @@ Minimal personal setup for the pi coding agent.
   homelab-validation, and delivery.
 - `agents/`: builder and independent reviewer role prompts.
 - `scripts/delivery-agent.ts`: sequential one-shot worker launcher with live progress.
-- `extensions/delivery-worker/`: coordinator tool and above-editor progress widget.
+- `extensions/delivery-worker/`: default one-shot coordinator tool and progress widget.
+- `extensions/delivery-tmux/`: explicit opt-in visible-tmux delivery controls.
+- `vendor/pi-interactive-subagents/`: pinned MIT runtime, fixed roles, and provenance.
 - `docs/delivery-workflow.md`: delivery roles, contract, and execution loop.
 - `AGENTS.override.md`: empty override shielding this repo from its
   Claude-specific context file.
@@ -110,12 +112,65 @@ Run launcher tests without model calls:
 
 See [the delivery workflow](docs/delivery-workflow.md) for the full plan.
 
+## Opt-in visible tmux delivery
+
+The one-shot tool/CLI above remain the default and fallback, unchanged.
+After approval of the installation and execution contract, opt in with:
+
+```bash
+bash install.sh --with-delivery-tmux
+```
+
+This adds only the delivery adapter symlink, never the generic vendor entry
+point; conflicting files/directories/links (including dangling links) are
+refused without overwrite. No settings are changed. Keep this checkout in
+place and reload Pi. Do not enable another extension exposing `subagent`,
+`subagent_message`, or `subagents_list`: collisions refuse delivery startup
+before vendor lifecycle initialization. Controls register at session start,
+not during factory loading. Runtime state is isolated from upstream instances.
+
+Use Pi inside tmux with a persistent lead session. The current lead explicitly
+runs builder -> validator -> independent reviewer, one worker at a time.
+Pass the approved packet as task text, including rules, baseline, exact checks,
+permissions, and report contract. Select the current model/thinking or specify
+`model` and `thinking`; no tools, cwd override, custom profiles, CLI, or nested
+spawning can be granted. Fixed bundled profiles ignore project/global agents.
+Builder: read/grep/find/ls/bash/edit/write/ask_question. Validator:
+read/grep/find/ls/bash/ask_question. Reviewer: read/grep/find/ls/ask_question.
+Only the child-control extension is loaded; extension, MCP, skill, template,
+theme, and context-file discovery are denied. These are tool limits, **not an
+OS/filesystem sandbox**; bash can change files and inspection paths are not
+confined. The packet supplies all required rules/resources explicitly.
+
+Results/questions arrive automatically; do not poll. Explicit inspection is
+for reconciliation. Answer with exact name/runId/questionId. `pause` preserves
+the owned pane/session and holds the slot; a matching answer does not rearm.
+Use `rearm` with explicit new work after inspecting actual changes. `stop` and
+the fixed 20-minute per-worker timeout cancel, never succeed. Supported
+configured child keyboard interruption preserves the proven interruption
+latch; there is no universal third-party abort guarantee. Parent shutdown and
+reload close only owned panes, idempotently, without parent-window retiling.
+Failed closes remain owned for retry; unresolved saved active state fails closed.
+
+`subagent_message` can resume only adapter-recorded sessions in this lead's
+branch, replaying unchanged pinned role, grants, identity, model/thinking,
+paths, and resource denials. Missing/old/changed metadata is refused; a generic
+name registry is not ownership. Saved resume is not a fresh independent review.
+A terminal worker frees the slot, **not acceptance**. Inspect retained session,
+sidecars, scripts, changes, and exact check evidence; use a fresh validator and
+reviewer, bounded fix cycles, then explicit lead acceptance. Evidence can be
+sensitive. Notifications are bounded; full artifacts remain on disk. Record
+resumable Munin handoffs rather than asking the user to copy prompts.
+
+Repository tests use isolated fake HOME/tmux and the installed loader, never
+real panes/providers. Independent review, actual installation/reload and live
+acceptance are separate gates; repository checks alone do not certify them.
+
 ## Expansion policy
 
 Before building new infrastructure, inspect https://pi.dev/packages for
-community alternatives. Future delivery subagents may use a community
-extension; no dependency is selected yet. Preserve approval contracts,
-independent review, evidence, cancellation, and clear integration ownership.
+community alternatives. Preserve approval contracts, independent review,
+evidence, cancellation, and clear integration ownership.
 The current widget is okay for now; Jev and Hermes work are deferred.
 
 ## History

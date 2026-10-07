@@ -1,0 +1,28 @@
+import {writeFileSync, renameSync, readFileSync, unlinkSync} from 'node:fs';
+import {randomUUID} from 'node:crypto';
+
+/** Single-slot sidecars, not a durable broker. Never expose partially written JSON. */
+export function atomicJson(file: string, value: unknown): void {
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try { writeFileSync(temporary, JSON.stringify(value), {flag:'wx'}); renameSync(temporary,file); }
+  finally { try {unlinkSync(temporary);} catch {} }
+}
+export function readJson(file: string): any {
+  try {return JSON.parse(readFileSync(file,'utf8'));} catch {return null;}
+}
+export interface Question {runId:string; questionId:string; question:string; name:string; agent:string;}
+export function isQuestion(value: any): value is Question {
+  return value && ['runId','questionId','question','name'].every(key=>typeof value[key]==='string' && value[key].trim()) &&
+    typeof value.agent==='string';
+}
+export function interruption(file: string, runId: string): any {
+  const value=readJson(`${file}.interrupt`);
+  return value?.runId===runId && ['paused','cancelled'].includes(value.state) ? value : null;
+}
+export const REPLY_PREFIX = 'PI_SUBAGENT_REPLY ';
+export const WORK_PREFIX = 'PI_SUBAGENT_WORK ';
+export function envelope(prefix:string, value:unknown): string {return prefix+JSON.stringify(value);}
+export function parseEnvelope(text:string|undefined, prefix:string): any {
+  if(!text?.startsWith(prefix)) return null;
+  try {return JSON.parse(text.slice(prefix.length));} catch {return null;}
+}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  mkdtemp, mkdir, readFile, readlink, rm, writeFile,
+  lstat, mkdtemp, mkdir, readFile, readlink, rm, symlink, writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -16,8 +16,8 @@ async function home(t: { after: (fn: () => Promise<void>) => void }) {
   return path;
 }
 
-function install(home: string) {
-  return spawnSync("bash", [resolve(root, "install.sh")], {
+function install(home: string, ...options: string[]) {
+  return spawnSync("bash", [resolve(root, "install.sh"), ...options], {
     env: { ...process.env, HOME: home },
     encoding: "utf8",
     timeout: 5000,
@@ -30,6 +30,7 @@ test("installer creates all links and is repeatable", async t => {
     const result = install(path);
     assert.equal(result.status, 0, result.stderr);
   }
+  await assert.rejects(lstat(resolve(path, ".pi/agent/extensions/delivery-tmux")), { code: "ENOENT" });
   assert.equal(
     await readlink(resolve(path, ".pi/agent/extensions/delivery-worker")),
     resolve(root, "extensions/delivery-worker"),
@@ -64,6 +65,38 @@ test("installer refuses conflicting extension files and dangling links in fake H
     assert.match(result.stderr, /Refusing to overwrite/);
     if (dangling) assert.equal(await readlink(conflict), resolve(path, "missing"));
     else assert.equal(await readFile(conflict, "utf8"), "keep extension");
+  }
+});
+
+test("tmux installer opt-in is repeatable and leaves default fallback installed", async t => {
+  const path = await home(t);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = install(path, "--with-delivery-tmux");
+    assert.equal(result.status, 0, result.stderr);
+  }
+  assert.equal(await readlink(resolve(path, ".pi/agent/extensions/delivery-tmux")), resolve(root, "extensions/delivery-tmux"));
+  assert.equal(await readlink(resolve(path, ".pi/agent/extensions/delivery-worker")), resolve(root, "extensions/delivery-worker"));
+  await assert.rejects(lstat(resolve(path, ".pi/agent/settings.json")), { code: "ENOENT" });
+});
+
+test("tmux opt-in preserves file, directory, conflicting and dangling symlinks", async t => {
+  for (const kind of ["file", "directory", "link", "dangling"]) {
+    const path = await home(t);
+    const conflict = resolve(path, ".pi/agent/extensions/delivery-tmux");
+    await mkdir(resolve(path, ".pi/agent/extensions"), { recursive: true });
+    if (kind === "file") await writeFile(conflict, "preserve");
+    else if (kind === "directory") await mkdir(conflict);
+    else {
+      const destination = resolve(path, kind);
+      if (kind === "link") await mkdir(destination);
+      await symlink(destination, conflict);
+    }
+    const result = install(path, "--with-delivery-tmux");
+    assert.equal(result.status, 1); assert.match(result.stderr, /Refusing to overwrite/);
+    if (kind === "file") assert.equal(await readFile(conflict, "utf8"), "preserve");
+    else if (kind === "directory") assert.ok((await lstat(conflict)).isDirectory());
+    else assert.equal(await readlink(conflict), resolve(path, kind));
+    await assert.rejects(lstat(resolve(path, ".pi/agent/extensions/delivery-worker")), { code: "ENOENT" });
   }
 });
 

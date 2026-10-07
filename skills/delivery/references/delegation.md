@@ -51,6 +51,43 @@ outcome. Cancellation/timeout retains evidence and may leave file changes.
 `agent_settled` before process close is finalizing. Exit 0 plus settlement and a
 valid final report means transport completion only, never task acceptance.
 
+## Explicit opt-in tmux contract
+
+Default one-shot behavior above is unchanged. Approve the visible mode and
+installation separately; `bash install.sh --with-delivery-tmux` adds the narrow
+adapter, never the generic upstream entry point. The lead stays in the current
+persistent tmux session, launching builder -> validator -> independent reviewer
+with the three model-only sequential controls. No automatic role scheduler,
+acceptance, parallel workers, nesting, custom/override profiles, or CLI path.
+
+For every phase supply the complete approved packet and explicit role rules.
+Builder tools: read/grep/find/ls/bash/edit/write/ask_question; validator:
+read/grep/find/ls/bash/ask_question; reviewer: read/grep/find/ls/ask_question.
+Only bundled child control loads; six discovery sources (extensions, MCP,
+skills, templates, themes, context files) are denied. Neither shell nor file
+read access is an OS sandbox. Expose only model/thinking choice, not grants.
+
+Results/questions arrive automatically. Preserve exact correlated run/question
+IDs; a reply releases waiting only. Pause preserves pane/session and the slot;
+rearm needs explicit new work after reconciliation. Stop and the fixed
+20-minute worker timeout classify cancelled. Supported configured child
+keyboard interruption is latched; arbitrary third-party aborts are outside the
+guarantee. Parent shutdown/reload retries owned-only cleanup, no parent retile.
+Failure evidence and failed-close ownership remain; unresolved saved active
+workers fail closed rather than being silently adopted or treated as successful.
+
+Saved resume requires this adapter's versioned branch ownership and unchanged
+pinned loadout/resource metadata, never an external registry entry. Missing,
+legacy, malformed, or altered metadata requires reconciliation/fresh approved
+work, not relaxed grants. Saved follow-up does not replace fresh review.
+Inspect full sessions, sidecars, launch scripts and exact validation evidence;
+notifications are bounded and may omit full reports. Retain evidence securely.
+
+Record Munin handoffs with task/attempt, approved scope, revision, reports/checks,
+owned resources, blockers, and next approved action. Omit secrets. The lead owns
+handoffs, retries (at most two focused fix cycles), final validation, review and
+explicit acceptance; do not ask the user to ferry prompts between roles.
+
 ## Coordinator gates
 
 - Verify actual repository changes, not only the builder's summary.

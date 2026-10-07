@@ -1,0 +1,1100 @@
+diff --git a/pi-extension/subagents/index.ts b/pi-extension/subagents/index.ts
+index 7e20a0f..885a255 100644
+--- a/pi-extension/subagents/index.ts
++++ b/pi-extension/subagents/index.ts
+@@ -33,6 +33,9 @@ import {
+   getSessionId,
+   readNameRegistry,
+   readSubagentLoadout,
++  isSubagentLoadout,
++  DELIVERY_TOOLS,
++  type DeliveryRole,
+   registerName,
+   resolveNameInRegistry,
+   seedSubagentSessionFile,
+@@ -41,6 +44,7 @@ import {
+   type SessionStats,
+   type SubagentLoadout,
+ } from "./session.ts";
++import { atomicJson, interruption, isQuestion, readJson, envelope, REPLY_PREFIX, WORK_PREFIX, type Question } from "./control.ts";
+ import {
+   type StatusSnapshot,
+   type SubagentStatusState,
+@@ -117,6 +121,7 @@ const SubagentParams = Type.Object({
+ type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
+ 
+ interface AgentDefaults {
++  deliveryRole?: string;
+   model?: string;
+   tools?: string;
+   skills?: string;
+@@ -292,6 +297,7 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
+           : undefined,
+     skills: getFrontmatterValue(frontmatter, "skill") ?? getFrontmatterValue(frontmatter, "skills"),
+     thinking: getFrontmatterValue(frontmatter, "thinking"),
++    deliveryRole: getFrontmatterValue(frontmatter, "delivery-role"),
+     subagentAgents: parseCommaList(getFrontmatterValue(frontmatter, "subagent_agents")),
+     autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
+     interactive: parseOptionalBoolean(getFrontmatterValue(frontmatter, "interactive")),
+@@ -549,7 +555,7 @@ function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
+ function resolveResultPresentation(
+   result: Pick<
+     SubagentResult,
+-    "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage"
++    "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage" | "error"
+   >,
+   name: string,
+ ): string {
+@@ -557,6 +563,9 @@ function resolveResultPresentation(
+   // resumes a finished one, so follow-ups always reference it.
+   const sessionRef = `\n\nFollow up with subagent_message({ name: "${name}", message: "…" })`;
+ 
++  if (result.error === "paused" || result.error === "cancelled") {
++    return `Sub-agent "${name}" ${result.error}. No completion is claimed.${sessionRef}`;
++  }
+   if (result.errorMessage) {
+     // Auto-retry exhausted or other agent-loop error. The subagent did not
+     // produce a usable result — surface the underlying provider/network
+@@ -616,6 +625,10 @@ interface RunningSubagent {
+     error?: string;
+   };
+   abortController?: AbortController;
++  pendingQuestion?: Question;
++  questionDiagnostic?: boolean;
++  interruptionNotified?: boolean;
++  interruptionIntent?: {runId: string; state: "paused" | "cancelled"; reason: string};
+   cli?: string;
+   sentinelFile?: string;
+   statusState: SubagentStatusState;
+@@ -837,9 +850,14 @@ function applySandboxToParts(
+   loadout: SubagentLoadout,
+   opts: { artifactDir: string; name: string },
+ ): void {
+-  if (loadout.model) {
+-    const model = loadout.thinking ? `${loadout.model}:${loadout.thinking}` : loadout.model;
+-    parts.push("--model", shellEscape(model));
++  if (!isSubagentLoadout(loadout)) throw new Error("Invalid subagent loadout; refusing launch");
++  if (loadout.model) parts.push("--model", shellEscape(loadout.model));
++  if (loadout.thinking) parts.push("--thinking", shellEscape(loadout.thinking));
++  if (loadout.deliveryRole) {
++    // No discovered capabilities, MCP connections, or extra tool-backing code.
++    // The caller explicitly loads only subagent-done.ts. This is not an OS sandbox.
++    parts.push("--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates",
++      "--no-themes", "--no-context-files", "--tools", shellEscape(loadout.toolAllowlist!));
+   }
+ 
+   if (loadout.identity) {
+@@ -860,7 +878,7 @@ function applySandboxToParts(
+   // Default-deny: disable global extension discovery and re-enable only the
+   // extensions backing the whitelisted tools. A null allowlist means the spawn
+   // was intentionally unrestricted (e.g. a fork clone) and is replayed as-is.
+-  if (loadout.toolAllowlist) {
++  if (loadout.toolAllowlist && !loadout.deliveryRole) {
+     parts.push("--no-extensions");
+     parts.push("--tools", shellEscape(loadout.toolAllowlist));
+ 
+@@ -1015,7 +1033,7 @@ function steerSubagent(
+ }
+ 
+ function handleSubagentSteer(
+-  params: { name?: string; message?: string },
++  params: { name?: string; message?: string; runId?: string; questionId?: string; action?: string },
+   send: (surface: string, command: string) => void = sendCommand,
+ ) {
+   const message = params.message?.trim();
+@@ -1036,7 +1054,22 @@ function handleSubagentSteer(
+   const now = Date.now();
+   observeRunningSubagent(running, now);
+ 
+-  const steer = steerSubagent(running, message, send);
++  let deliveredMessage = message;
++  if (params.questionId || params.runId) {
++    const pending = readJson(`${running.sessionFile}.pending-question`);
++    if (!isQuestion(pending) || pending.runId !== params.runId || pending.questionId !== params.questionId || pending.runId !== running.id) {
++      const error = "Reply does not match this run's pending question";
++      return { content: [{type:"text" as const, text:error}], details:{error} };
++    }
++    deliveredMessage = envelope(REPLY_PREFIX, {runId:params.runId, questionId:params.questionId, message});
++  } else if (params.action === "rearm") {
++    deliveredMessage = envelope(WORK_PREFIX, {runId:running.id, message});
++  }
++  const steer = steerSubagent(running, deliveredMessage, send);
++  if (params.action === "rearm" && !("error" in steer)) {
++    running.interruptionNotified = false;
++    running.interruptionIntent = undefined;
++  }
+   if ("error" in steer) {
+     return {
+       content: [{ type: "text" as const, text: steer.error }],
+@@ -1142,6 +1175,7 @@ export const __test__ = {
+   resolveResultPresentation,
+   resolveResumeLaunchBehavior,
+   runningSubagents,
++  watchSubagent,
+   formatElapsed,
+   formatTokens,
+   formatContextUsage,
+@@ -1175,7 +1209,15 @@ async function launchSubagent(
+ 
+   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
+   const effectiveModel = params.model ?? agentDefs?.model;
+-  const effectiveTools = agentDefs?.tools;
++  const deliveryRole = agentDefs?.deliveryRole;
++  if (deliveryRole && (!Object.hasOwn(DELIVERY_TOOLS, deliveryRole) ||
++      agentDefs?.cli === "claude" || agentDefs?.skills || agentDefs?.subagentAgents?.length)) {
++    throw new Error("Invalid delivery profile: only builder/validator/reviewer with no skills, nested spawning, or alternate CLI are allowed");
++  }
++  if (deliveryRole && agentDefs?.tools && buildSubagentToolAllowlist(agentDefs.tools) !== DELIVERY_TOOLS[deliveryRole as DeliveryRole]) {
++    throw new Error("Delivery profile tools must match its pinned role grants; refusing silent capability changes");
++  }
++  const effectiveTools = deliveryRole ? DELIVERY_TOOLS[deliveryRole as DeliveryRole] : agentDefs?.tools;
+   const effectiveSkills = agentDefs?.skills;
+   const effectiveThinking = agentDefs?.thinking;
+   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
+@@ -1204,9 +1246,11 @@ async function launchSubagent(
+   // Use pre-created surface (parallel mode) or create a new one.
+   // For new surfaces, pause briefly so the shell is ready before sending the command.
+   const surfacePreCreated = !!options?.surface;
+-  const surface = options?.surface ?? createSurface(params.name);
+-  if (!surfacePreCreated) {
+-    await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
++  // Defer pane creation until generated Pi metadata has validated and persisted.
++  async function prepareSurface() {
++    const surface = options?.surface ?? createSurface(params.name);
++    if (!surfacePreCreated) await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
++    return surface;
+   }
+ 
+   const launchBehavior = resolveLaunchBehavior(params, agentDefs);
+@@ -1245,6 +1289,7 @@ async function launchSubagent(
+     : `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
+   // ── Claude Code CLI path ──
+   if (agentDefs?.cli === "claude") {
++    const surface = await prepareSurface();
+     const sentinelFile = `/tmp/pi-claude-${id}-done`;
+     const pluginDir = join(SUBAGENTS_DIR, "plugin");
+ 
+@@ -1339,22 +1384,29 @@ async function launchSubagent(
+   // `subagent_message({ name })` resume can replay the exact same
+   // restriction instead of relaunching pi with all global extensions + tools.
+   const loadout: SubagentLoadout = {
++    deliveryRole: (deliveryRole as DeliveryRole) ?? null,
+     agent: params.agent ?? null,
+     toolAllowlist,
+     model: effectiveModel ?? null,
+     thinking: effectiveThinking ?? null,
+-    systemPromptMode: systemPromptMode ?? null,
++    systemPromptMode: identityInSystemPrompt ? systemPromptMode! : null,
+     identity: identityInSystemPrompt ? identity : null,
+     spawnable: agentDefs?.subagentAgents ?? null,
+     autoExit: agentDefs?.autoExit ?? false,
+     cwd: effectiveCwd ?? null,
+     agentDir: resolvedAgentDir,
+   };
++  if (!isSubagentLoadout(loadout)) throw new Error("Invalid generated loadout; refusing pane creation");
++  mkdirSync(dirname(subagentSessionFile), { recursive: true });
+   writeSubagentLoadout(subagentSessionFile, loadout);
++  if (JSON.stringify(readSubagentLoadout(subagentSessionFile)) !== JSON.stringify(loadout)) {
++    throw new Error("Generated loadout did not persist faithfully; refusing pane creation");
++  }
+ 
+   // Apply model, identity, and the default-deny tool/extension restriction via
+   // the shared helper (same code path resume uses — they can't drift).
+   applySandboxToParts(parts, loadout, { artifactDir, name: params.name });
++  const surface = await prepareSurface();
+ 
+   // Build env prefix: subagent identity + config dir propagation + spawn allowlist
+   const envParts: string[] = [];
+@@ -1366,6 +1418,7 @@ async function launchSubagent(
+   if (grantSpawning && agentDefs?.subagentAgents) {
+     envParts.push(`PI_SUBAGENT_ALLOWED=${shellEscape(agentDefs.subagentAgents.join(","))}`);
+   }
++  if (deliveryRole) envParts.push(`PI_SUBAGENT_DELIVERY=1`);
+   envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
+   if (params.agent) {
+     envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
+@@ -1484,7 +1537,7 @@ function copyClaudeSession(sentinelFile: string): string | null {
+  * orchestrator without ending the subagent. Each subagent has its own
+  * `${sessionFile}.ask` file and its own watcher, so parallel questions from
+  * multiple subagents are delivered independently. The file is deleted after
+- * delivery so it fires once per question (a subagent may ask again later).
++ * successful lead notification; malformed/failed publications remain for retry.
+  */
+ function deliverPendingQuestion(running: RunningSubagent): void {
+   const askFile = `${running.sessionFile}.ask`;
+@@ -1493,19 +1546,25 @@ function deliverPendingQuestion(running: RunningSubagent): void {
+     if (!existsSync(askFile)) return;
+     payload = JSON.parse(readFileSync(askFile, "utf-8"));
+   } catch {
+-    // Malformed/partway-written file — drop it and move on.
++    // Preserve malformed publications for retry/report; never acknowledge them.
+   }
+-  try {
+-    unlinkSync(askFile);
+-  } catch {}
+-  if (!payload?.question) return;
++  if (!isQuestion(payload) || payload.runId !== running.id) {
++    if (latestPi && !running.questionDiagnostic && existsSync(askFile)) {
++      try {
++        latestPi.sendMessage({customType:"subagent_question_error", content:`Invalid question publication from ${running.name}; retained for reconciliation.`, display:true, details:{name:running.name}}, {triggerTurn:false});
++        running.questionDiagnostic = true;
++      } catch {} // Retry notification; keep the publication and worker intact.
++    }
++    return;
++  }
++  if (!latestPi) return;
+ 
+   const name = running.name; // unique per session (deduped at spawn) — targets the reply
+   const sessionId = existsSync(running.sessionFile) ? getSessionId(running.sessionFile) : null;
+   const elapsed = Math.floor((Date.now() - running.startTime) / 1000);
+-  const replyHint = `\n\nReply with subagent_message({ name: "${name}", message: "…" }) — the same name works whether it is still running or has since exited. It stays open until you reply.`;
++  const replyHint = `\n\nReply with subagent_message({ name: "${name}", runId: "${payload.runId}", questionId: "${payload.questionId}", message: "…" }). Only the matching reply releases waiting.`;
+ 
+-  latestPi?.sendMessage(
++  try { latestPi.sendMessage(
+     {
+       customType: "subagent_question",
+       content: `Sub-agent "${name}" asks (${formatElapsed(elapsed)}):\n\n${payload.question}${replyHint}`,
+@@ -1514,11 +1573,17 @@ function deliverPendingQuestion(running: RunningSubagent): void {
+         name,
+         agent: running.agent,
+         question: payload.question,
++        runId: payload.runId,
++        questionId: payload.questionId,
+         ...(sessionId ? { sessionId } : {}),
+       },
+     },
+     { triggerTurn: true, deliverAs: "steer" },
+   );
++  } catch { return; } // Notification failed: retry without removing publication.
++  // Notification must succeed before recording/removing publication.
++  running.pendingQuestion = payload;
++  try { unlinkSync(askFile); } catch {}
+ }
+ 
+ async function watchSubagent(
+@@ -1535,10 +1600,24 @@ async function watchSubagent(
+       onTick() {
+         observeRunningSubagent(running);
+         deliverPendingQuestion(running);
++        const intent = running.interruptionIntent ?? interruption(running.sessionFile, running.id);
++        if (intent?.state === "paused" && !running.interruptionNotified && latestPi) {
++          try {
++            latestPi.sendMessage({customType:"subagent_interrupted", content:`Sub-agent "${running.name}" ${intent.state}; pane/session preserved.`, display:true, details:{name:running.name,runId:running.id,...intent}}, {triggerTurn:true,deliverAs:"steer"});
++            running.interruptionNotified = true;
++          } catch {}
++        }
+       },
+     });
+ 
+     const elapsed = Math.floor((Date.now() - startTime) / 1000);
++    const intent = running.interruptionIntent ?? interruption(sessionFile, running.id);
++    if (intent) {
++      // Stop can race a successful poll resolution; it still owns teardown.
++      if (intent.state === "cancelled") closeSurface(surface);
++      runningSubagents.delete(running.id);
++      return {name, task, summary:`Subagent ${intent.state}${intent.state === "paused" ? "; pane/session preserved" : ""}.`, exitCode:1, elapsed, error:intent.state, sessionFile};
++    }
+ 
+     if (running.cli === "claude") {
+       // Claude Code result extraction
+@@ -1613,12 +1692,15 @@ async function watchSubagent(
+       ...(stats ? { stats } : {}),
+     };
+   } catch (err: any) {
+-    try {
+-      closeSurface(surface);
+-    } catch {}
++    const cancelled = signal.aborted || getModuleAbortSignal().aborted;
++    const intent = running.interruptionIntent ?? interruption(sessionFile, running.id);
++    if (cancelled || !intent) {
++      try { closeSurface(surface); } catch {}
++    }
+     runningSubagents.delete(running.id);
++    if (intent && !cancelled) return {name,task,summary:`Subagent ${intent.state}; pane/session preserved.`,exitCode:1,elapsed:Math.floor((Date.now()-startTime)/1000),error:intent.state,sessionFile};
+ 
+-    if (signal.aborted) {
++    if (cancelled) {
+       return {
+         name,
+         task,
+@@ -1668,11 +1750,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
+       (globalThis as any)[STATUS_INTERVAL_KEY] = null;
+     }
+     const moduleAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
+-    if (moduleAbort) moduleAbort.abort();
+-    for (const [_id, agent] of runningSubagents) {
+-      agent.abortController?.abort();
++    const agents = [...runningSubagents.values()];
++    const errors: unknown[] = [];
++    // Own all cancellation before filesystem work; isolate each owned worker.
++    for (const agent of agents) agent.interruptionIntent = {runId:agent.id,state:"cancelled",reason:"parent teardown"};
++    for (const agent of agents) {
++      try { atomicJson(`${agent.sessionFile}.interrupt`, agent.interruptionIntent); }
++      catch (error) { errors.push(error); }
++      finally {
++        agent.abortController?.abort(); // The owned watcher closes its surface.
++      }
+     }
++    if (moduleAbort) moduleAbort.abort();
+     runningSubagents.clear();
++    if (errors.length) throw new AggregateError(errors, "Owned teardown completed with persistence failures");
+   });
+ 
+   // The spawning tools are always registered here. Whether a child process can
+@@ -1832,13 +1923,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
+ 
+             pi.sendMessage(
+               {
+-                customType: "subagent_result",
++                customType: result.error === "paused" ? "subagent_interrupted" : result.error === "cancelled" ? "subagent_cancelled" : "subagent_result",
+                 content: presentation,
+                 display: true,
+                 details: {
+                   name: running.name,
+                   task: running.task,
+                   agent: running.agent,
++                  status: result.error === "paused" || result.error === "cancelled" ? result.error : result.exitCode === 0 ? "completed" : "error",
+                   exitCode: result.exitCode,
+                   elapsed: result.elapsed,
+                   sessionFile: result.sessionFile,
+@@ -2012,24 +2104,26 @@ export default function subagentsExtension(pi: ExtensionAPI) {
+         "Send a message to a subagent by name. Names are unique within your session and persist after a subagent finishes, " +
+         "so the SAME name works whether the subagent is running or finished: if it is still running, your message steers its live session; " +
+         "if it has finished, your message resumes that session and continues it. " +
+-        "`name` and `message` are both required. " +
++        "`name` is required; `message` is required for work/replies. Question replies also require the notified runId/questionId. " +
++        "Use action pause to interrupt and preserve the pane/session, stop to cancel/close it, or rearm with an explicit new work message. " +
+         "Steering a running subagent returns immediately with a local acknowledgement and does NOT, by itself, emit a new result. " +
+         "Resuming is a fire-and-forget async call: when the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up. " +
+         "DO NOT poll, sleep, tail logs, or read session files to detect completion — the harness handles delivery. " +
+         "DO NOT fabricate or assume results. After calling, either end your turn or work on other independent tasks.",
+       promptSnippet:
+         "Message a subagent by name: steers it if running, resumes it if finished (same name either way). " +
+-        "`name` and `message` are required. Steering returns immediately; resuming delivers its result later as a steer message. " +
++        "Correlate replies with runId/questionId. Pause preserves; stop cancels; rearm explicitly starts new work. " +
++        "Steering returns immediately; resuming delivers its result later as a steer message. " +
+         "Do not poll or fabricate results.",
+       parameters: Type.Object({
+         name: Type.String({
+           description:
+             "Exact display name of the subagent. Steers it if it is still running; resumes its session if it has finished.",
+         }),
+-        message: Type.String({
+-          description:
+-            "The message to deliver: a follow-up instruction for a running subagent, or the next task for a resumed session.",
+-        }),
++        message: Type.Optional(Type.String({description:"Follow-up, matching answer, or explicit new work."})),
++        runId: Type.Optional(Type.String({description:"Run ID from question notification (required for replies)."})),
++        questionId: Type.Optional(Type.String({description:"Question ID from notification (required for replies)."})),
++        action: Type.Optional(Type.Union([Type.Literal("pause"), Type.Literal("stop"), Type.Literal("rearm")])),
+       }),
+ 
+       renderCall(args, theme) {
+@@ -2086,7 +2180,25 @@ export default function subagentsExtension(pi: ExtensionAPI) {
+         // A name that matches a currently-running subagent always steers it.
+         const runningMatch = Array.from(runningSubagents.values()).find((r) => r.name === requestedName);
+         if (runningMatch) {
+-          return handleSubagentSteer({ name: requestedName, message: params.message });
++          if (params.action === "pause" || params.action === "stop") {
++            runningMatch.interruptionIntent = {runId:runningMatch.id,state:params.action === "stop" ? "cancelled" : "paused",reason:`delivery ${params.action}`};
++            try { atomicJson(`${runningMatch.sessionFile}.interrupt`, runningMatch.interruptionIntent); }
++            finally {
++              if (params.action === "stop") {
++                runningMatch.abortController?.abort(); // Watcher owns surface closure.
++              } else sendCommand(runningMatch.surface, `/subagent-control ${runningMatch.id} pause`);
++            }
++            return {content:[{type:"text" as const,text:`Subagent ${params.action === "stop" ? "cancelled" : "paused; pane/session preserved"}.`}],details:{name:requestedName,status:params.action === "stop" ? "cancelled" : "paused"}};
++          }
++          return handleSubagentSteer({ ...params, name: requestedName });
++        }
++        if (params.action === "pause" || params.action === "stop" || params.questionId || params.runId) {
++          const error = "Control/reply requires the matching live run; refusing stale control or answer";
++          return {content:[{type:"text" as const,text:error}],details:{error}};
++        }
++        if (!params.message?.trim()) {
++          const error = "A new work message is required to resume";
++          return {content:[{type:"text" as const,text:error}],details:{error}};
+         }
+ 
+         // ── Resume a finished session by name ──
+@@ -2135,13 +2247,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
+         const loadout = readSubagentLoadout(sessionPath);
+         if (!loadout) {
+           const err =
+-            `Cannot safely resume "${requestedName}": no sandbox snapshot found for this session ` +
++            `Cannot safely resume "${requestedName}": missing or invalid sandbox snapshot for this session ` +
+             `(it predates sandboxed resume, or its .loadout.json sidecar was removed). ` +
+             `Resuming would relaunch with all global extensions and the full toolset, so this is refused. ` +
+             `Re-run the task as a fresh subagent instead.`;
+           return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+         }
+ 
++        // A previous run's terminal error is not an outcome of this resume.
++        // Clear before starting the watcher (child startup alone would race it).
++        try { unlinkSync(`${sessionPath}.exit`); } catch {}
++
+         const resumedSessionId = entry.sessionId ?? getSessionId(sessionPath) ?? requestedName;
+ 
+         // Record entry count before resuming so we can extract new messages.
+@@ -2199,6 +2315,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
+         if (loadout.agent) {
+           resumeEnvParts.push(`PI_SUBAGENT_AGENT=${shellEscape(loadout.agent)}`);
+         }
++        if (loadout.deliveryRole) resumeEnvParts.push(`PI_SUBAGENT_DELIVERY=1`);
+         resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellEscape(name)}`);
+         resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellEscape(sessionPath)}`);
+         resumeEnvParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
+@@ -2276,12 +2393,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
+ 
+             pi.sendMessage(
+               {
+-                customType: "subagent_result",
++                customType: result.error === "paused" ? "subagent_interrupted" : result.error === "cancelled" ? "subagent_cancelled" : "subagent_result",
+                 content: presentation,
+                 display: true,
+                 details: {
+                   name,
+                   task: message,
++                  status: result.error === "paused" || result.error === "cancelled" ? result.error : result.exitCode === 0 ? "completed" : "error",
+                   exitCode: result.exitCode,
+                   elapsed: result.elapsed,
+                   sessionFile: sessionPath,
+diff --git a/pi-extension/subagents/session.ts b/pi-extension/subagents/session.ts
+index 24d89a3..12e91ca 100644
+--- a/pi-extension/subagents/session.ts
++++ b/pi-extension/subagents/session.ts
+@@ -93,14 +93,23 @@ export function seedSubagentSessionFile(params: {
+  * resume faithful even if the agent definition is later edited, moved, or
+  * deleted.
+  */
++export const DELIVERY_TOOLS = {
++  builder: "read,grep,find,ls,bash,edit,write,ask_question",
++  validator: "read,grep,find,ls,bash,ask_question",
++  reviewer: "read,grep,find,ls,ask_question",
++} as const;
++export type DeliveryRole = keyof typeof DELIVERY_TOOLS;
++
+ export interface SubagentLoadout {
++  /** Explicit opt-in; null explicitly denotes legacy, not delivery restrictions. */
++  deliveryRole: DeliveryRole | null;
+   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
+   agent: string | null;
+   /** The `--tools` allowlist string, or null when the spawn was unrestricted. */
+   toolAllowlist: string | null;
+   /** Model id (without thinking suffix), or null to use the session default. */
+   model: string | null;
+-  /** Thinking level appended to the model as `model:level`, or null. */
++  /** Requested independent --thinking level; host clamps to model capabilities. */
+   thinking: string | null;
+   /** How the identity text was applied: append/replace, or null. */
+   systemPromptMode: "append" | "replace" | null;
+@@ -131,14 +140,52 @@ export function writeSubagentLoadout(sessionFile: string, loadout: SubagentLoado
+   }
+ }
+ 
+-/** Read a subagent's loadout snapshot, or null if absent/unparseable. */
++/** Validate complete snapshots; absence of metadata must never grant defaults. */
++export function isSubagentLoadout(value: unknown): value is SubagentLoadout {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
++  const v = value as Record<string, unknown>;
++  const nullableStrings = ["agent", "toolAllowlist", "model", "thinking", "identity", "cwd", "agentDir"];
++  for (const key of nullableStrings) {
++    if (!Object.hasOwn(v, key) || (v[key] !== null &&
++      (typeof v[key] !== "string" || !(v[key] as string).trim() || (v[key] as string).includes("\0")))) return false;
++  }
++  if (typeof v.autoExit !== "boolean" ||
++    !Object.hasOwn(v, "systemPromptMode") ||
++    ![null, "append", "replace"].includes(v.systemPromptMode as any) ||
++    !Object.hasOwn(v, "spawnable")) return false;
++  if ((v.identity === null) !== (v.systemPromptMode === null)) return false;
++  if (v.thinking !== null &&
++    !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(v.thinking as string)) return false;
++  const names = (items: unknown): items is string[] => Array.isArray(items) &&
++    items.every(item => typeof item === "string" && /^[a-zA-Z0-9_.-]+$/.test(item)) &&
++    new Set(items).size === items.length;
++  if (v.spawnable !== null && !names(v.spawnable)) return false;
++  if (!Object.hasOwn(v, "deliveryRole")) return false;
++  if (v.deliveryRole !== null) {
++    if (!Object.hasOwn(DELIVERY_TOOLS, v.deliveryRole as string) ||
++      v.toolAllowlist !== DELIVERY_TOOLS[v.deliveryRole as DeliveryRole] ||
++      v.spawnable !== null) return false;
++  }
++  if (v.toolAllowlist !== null) {
++    const tools = (v.toolAllowlist as string).split(",");
++    if (!names(tools) || !tools.includes("ask_question")) return false;
++    const spawning = ["subagent", "subagent_message", "subagents_list"];
++    const granted = Array.isArray(v.spawnable) && v.spawnable.length > 0;
++    if (spawning.some(tool => tools.includes(tool) !== granted)) return false;
++  } else if (Array.isArray(v.spawnable) && v.spawnable.length > 0) {
++    // A spawning grant always generated an explicit restricted allowlist.
++    return false;
++  }
++  return true;
++}
++
++/** Read a complete, consistent snapshot, or null if absent/invalid. */
+ export function readSubagentLoadout(sessionFile: string): SubagentLoadout | null {
+   try {
+     const p = loadoutSidecarPath(sessionFile);
+     if (!existsSync(p)) return null;
+     const parsed = JSON.parse(readFileSync(p, "utf8"));
+-    if (!parsed || typeof parsed !== "object") return null;
+-    return parsed as SubagentLoadout;
++    return isSubagentLoadout(parsed) ? parsed : null;
+   } catch {
+     return null;
+   }
+diff --git a/pi-extension/subagents/subagent-done.ts b/pi-extension/subagents/subagent-done.ts
+index ba37f06..c46331e 100644
+--- a/pi-extension/subagents/subagent-done.ts
++++ b/pi-extension/subagents/subagent-done.ts
+@@ -4,7 +4,7 @@
+  * - Provides an `ask_question` tool for asking the parent orchestrator a question
+  *
+  * Subagents do NOT self-terminate via a tool. Auto-exit agents shut down
+- * automatically when their agent loop ends (see the `agent_end` handler);
++ * automatically after final host settlement (see `agent_settled`);
+  * interactive agents end when the human exits the pane.
+  *
+  * `ask_question` keeps the session OPEN: it writes a `${sessionFile}.ask`
+@@ -13,10 +13,12 @@
+  * replies with subagent_message — which lands as the subagent's next turn.
+  */
+ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+-import { Box, Text } from "@mariozechner/pi-tui";
++import { Box, Text, getKeybindings } from "@mariozechner/pi-tui";
+ import { Type } from "@sinclair/typebox";
+-import { writeFileSync } from "node:fs";
++import { writeFileSync, unlinkSync } from "node:fs";
+ import { createSubagentActivityRecorder } from "./activity.ts";
++import { randomUUID } from "node:crypto";
++import { atomicJson, interruption, isQuestion, readJson, REPLY_PREFIX, WORK_PREFIX, parseEnvelope, type Question } from "./control.ts";
+ 
+ export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
+   return agentStarted;
+@@ -180,31 +182,96 @@ export default function (pi: ExtensionAPI) {
+   let agentStarted = false;
+   // Set when ask_question is called; suppresses auto-exit so the session stays
+   // open while it waits for the orchestrator's reply. Cleared when the reply
+-  // lands — on `input` (covers a reply steered into the current run) and on
+-  // `agent_start` (covers a reply that starts a fresh turn after parking).
++  // lands as a matching run/question envelope on `input`.
++  // Automatic recovery also emits agent_start, which is not an answer.
+   let awaitingAnswer = false;
++  let latestMessages: any[] | undefined;
++  let reachedBoundary = false;
++  const sessionFile = process.env.PI_SUBAGENT_SESSION;
++  const runId = process.env.PI_SUBAGENT_ID ?? randomUUID();
++  let pendingQuestion: Question | null = null;
++  let questionPublicationFailed = false;
++  let interrupted = !!(sessionFile && interruption(sessionFile, runId));
++  let terminalCommitted = false;
++  let removeInputListener: (() => void) | undefined;
++  let controlTimer: ReturnType<typeof setInterval> | undefined;
++
++  // Completion linearizes at the synchronous terminal publication below. Input
++  // observed before that commit wins; a later key cannot undo published completion.
++  // Automatic recovery never clears this latch. Unapproved extension aborts are
++  // outside the delivery guarantee; no inference is made from ctx.signal.
++  function pause(state: "paused" | "cancelled", reason: string) {
++    if (terminalCommitted) return;
++    interrupted = true;
++    try { if (sessionFile) atomicJson(`${sessionFile}.interrupt`, {runId, state, reason}); }
++    finally { clearExitSidecar(); recorder.agentEndWaiting(); }
++  }
++
++  function clearExitSidecar() {
++    const file = process.env.PI_SUBAGENT_SESSION;
++    if (file) { try { unlinkSync(`${file}.exit`); } catch {} }
++  }
+ 
+   // Show widget + status bar on session start
+   pi.on("session_start", (_event, ctx) => {
++    clearExitSidecar();
+     recorder.sessionStart();
+     const tools = pi.getAllTools();
+     toolNames = tools.map((t) => t.name).sort();
+     denied = parseDeniedTools(deniedToolsValue);
+ 
+     renderWidget(ctx, null);
++    if (ctx.mode === "tui") {
++      removeInputListener = ctx.ui.onTerminalInput(data => {
++        if (getKeybindings().matches(data, "app.interrupt")) {
++          try { pause("paused", "keyboard app.interrupt"); }
++          catch (error) { ctx.ui.notify(`Interruption persistence failed: ${String(error)}`, "error"); }
++          // Do not throw out of the terminal listener: the host must still abort.
++        }
++      });
++    }
++    if (sessionFile) {
++      const saved = readJson(`${sessionFile}.pending-question`);
++      if (isQuestion(saved) && saved.runId === runId) { pendingQuestion = saved; awaitingAnswer = true; }
++      controlTimer = setInterval(() => {
++        if (!interrupted && interruption(sessionFile, runId)) {
++          interrupted = true; clearExitSidecar(); recorder.agentEndWaiting();
++          ctx.abort(); // Intent is already atomically visible before issuing abort.
++        }
++      }, 25);
++      controlTimer.unref();
++    }
++  });
++
++  pi.registerCommand("subagent-control", {
++    description: "Owned delivery interruption/re-arm (run id required)",
++    handler: async (args, ctx) => {
++      const [target, action] = args.trim().split(/\s+/);
++      if (target !== runId || terminalCommitted) return;
++      if (action === "pause") { try { pause("paused", "delivery pause"); } finally { ctx.abort(); } }
++      if (action === "rearm") {
++        interrupted = false;
++        if (sessionFile) { try { unlinkSync(`${sessionFile}.interrupt`); } catch {} }
++      }
++    },
+   });
+ 
+-  pi.on("input", () => {
++  pi.on("input", (event) => {
+     recorder.input();
+-    // A submitted message is the orchestrator's (or a human's) reply — the
+-    // pending ask_question has been answered, however it was delivered. Clear
+-    // here, not only on agent_start, because a reply steered in *mid-run* is
+-    // absorbed into the current run (pi's `steer` behavior injects it before
+-    // the next LLM call): no new agent_start fires, so without this the flag
+-    // would stay set and agent_end would park the session as `waiting` even
+-    // though the answer already arrived and was consumed. (The `input` event
+-    // fires for mid-run steers because prompt() emits it before queueing.)
+-    awaitingAnswer = false;
++    const reply = parseEnvelope(event.text, REPLY_PREFIX);
++    if (reply && pendingQuestion && reply.runId === pendingQuestion.runId &&
++        reply.questionId === pendingQuestion.questionId && typeof reply.message === "string" && reply.message.trim()) {
++      awaitingAnswer = false; pendingQuestion = null;
++      if (sessionFile) { try { unlinkSync(`${sessionFile}.pending-question`); } catch {} }
++      return { action: "transform" as const, text: reply.message };
++    }
++    const work = parseEnvelope(event.text, WORK_PREFIX);
++    if (work?.runId === runId && typeof work.message === "string" && work.message.trim()) {
++      interrupted = false;
++      if (sessionFile) { try { unlinkSync(`${sessionFile}.interrupt`); } catch {} }
++      return { action: "transform" as const, text: work.message };
++    }
++    // Unrelated input and automatic starts are neither replies nor explicit re-arm.
+     // Ignore the initial task message that starts an autonomous subagent.
+     // Only inputs after the first agent run has started count as user takeover.
+     if (!shouldMarkUserTookOver(agentStarted)) return;
+@@ -215,16 +282,38 @@ export default function (pi: ExtensionAPI) {
+     recorder.beforeAgentStart();
+   });
+ 
+-  pi.on("agent_start", () => {
++  pi.on("agent_start", (_event, ctx) => {
+     agentStarted = true;
+-    // A new turn is starting — any pending ask_question has now been answered
+-    // (or superseded), so let auto-exit resume normally when this turn ends.
+-    awaitingAnswer = false;
++    latestMessages = undefined;
++    reachedBoundary = false;
++    clearExitSidecar();
++    // Recovery/queued continuation is not acknowledgment of a pending question.
++    // Only a matching run/question reply clears awaitingAnswer.
+     recorder.agentStart();
++    if (interrupted || (sessionFile && interruption(sessionFile, runId))) {
++      interrupted = true;
++      recorder.agentEndWaiting();
++      ctx.abort(); // A paused latch also covers queued/automatic restarts.
++    }
++  });
++
++  pi.on("agent_end", (event) => {
++    latestMessages = event.messages;
++    // Recovery and queued continuations still own this run. Do not publish a
++    // terminal activity state, sidecar, or shutdown request here.
++    reachedBoundary = false;
++  });
++
++  pi.on("agent_before_settle", (event) => {
++    // Cancellation during retry/compaction bypasses this boundary entirely.
++    // Observe only: do not request continuation or modify the host context.
++    reachedBoundary = event.outcome !== "aborted";
+   });
+ 
+-  pi.on("agent_end", (event, ctx) => {
+-    const messages = (event as any).messages as any[] | undefined;
++  pi.on("agent_settled", (_event, ctx) => {
++    // agent_settled is notification-only and has no messages payload. Retain
++    // only the latest loop's finalized messages, not an intermediate error.
++    const messages = latestMessages;
+     // Never shut down while this session still has work in flight:
+     //  - awaitingAnswer: an ask_question is pending the orchestrator's reply.
+     //  - runningChildrenCount(): this subagent spawned its own children and is
+@@ -234,17 +323,23 @@ export default function (pi: ExtensionAPI) {
+     // turn lands.
+     const hasPendingChildren = runningChildrenCount() > 0;
+     const shouldExit =
++      reachedBoundary &&
++      !interrupted &&
++      !(sessionFile && interruption(sessionFile, runId)) &&
++      messages !== undefined &&
+       !awaitingAnswer &&
+       !hasPendingChildren &&
+       autoExit &&
+       shouldAutoExitOnAgentEnd(userTookOver, messages);
+ 
+     if (shouldExit) {
++      terminalCommitted = true;
+       // Surface stopReason: "error" turns (auto-retry exhausted, provider
+       // overload, etc.) to the parent via the .exit sidecar so the watcher
+       // can report a clear failure with the underlying error message.
+       // Without this the parent would only see exit code 0 and a stale
+       // assistant message, mistaking the crash for a successful completion.
++      clearExitSidecar();
+       const errorInfo = findLatestAssistantError(messages);
+       const sessionFile = process.env.PI_SUBAGENT_SESSION;
+       if (errorInfo && sessionFile) {
+@@ -317,6 +412,9 @@ export default function (pi: ExtensionAPI) {
+   });
+ 
+   pi.on("session_shutdown", (event) => {
++    if (controlTimer) clearInterval(controlTimer);
++    removeInputListener?.();
++    if (!terminalCommitted) pause("cancelled", "session teardown");
+     recorder.sessionShutdown((event as any).reason);
+   });
+ 
+@@ -337,12 +435,12 @@ export default function (pi: ExtensionAPI) {
+       "Use this when requirements are ambiguous, a decision would materially affect your work, you're blocked, " +
+       "or you need information or confirmation only the orchestrator has. Prefer asking over guessing. " +
+       "Your session stays open while you wait — the answer arrives as your next message, then you continue. " +
+-      "Ask exactly one question per call; make separate calls for unrelated questions.",
++      "Ask one outstanding question at a time; wait for its matching reply before another call.",
+     promptSnippet:
+       "Use this tool to ask the orchestrator one clarifying, missing-requirement, preference, or decision question before continuing — instead of guessing.",
+     promptGuidelines: [
+       "Ask exactly one question per tool call.",
+-      "If you need answers to multiple things, make separate ask_question calls instead of bundling them.",
++      "Wait for the matching reply before asking another question; do not bundle unrelated decisions.",
+       "Prefer this tool over guessing when requirements, preferences, or implementation choices are unclear.",
+       "Use it when multiple valid paths exist and the right one depends on the orchestrator's intent.",
+       "Give enough context in the question that the orchestrator can answer without re-reading your whole task.",
+@@ -363,17 +461,40 @@ export default function (pi: ExtensionAPI) {
+         );
+       }
+ 
++      if (!params.question.trim()) throw new Error("Question must not be blank");
++      if (pendingQuestion) {
++        if (!questionPublicationFailed || pendingQuestion.question !== params.question)
++          throw new Error("A question is already pending; retry the unpublished question or wait for its matching reply");
++        atomicJson(`${sessionFile}.ask`, pendingQuestion);
++        questionPublicationFailed = false;
++        recorder.askQuestion();
++        return {content:[{type:"text" as const,text:"Question publication retried; wait for its matching reply."}],details:pendingQuestion};
++      }
+       // Keep the session open: suppress auto-exit for this turn and park in the
+       // "waiting" phase. The parent's watcher picks up the `.ask` signal and
+       // notifies the orchestrator, who replies via subagent_message.
+-      awaitingAnswer = true;
+-      recorder.askQuestion();
+-      const askData = {
++      const askData: Question = {
++        runId, questionId: randomUUID(),
+         name: process.env.PI_SUBAGENT_NAME ?? "subagent",
+         agent: process.env.PI_SUBAGENT_AGENT ?? "",
+         question: params.question,
+       };
+-      writeFileSync(`${sessionFile}.ask`, JSON.stringify(askData));
++      atomicJson(`${sessionFile}.pending-question`, askData);
++      pendingQuestion = askData; awaitingAnswer = true;
++      try { atomicJson(`${sessionFile}.ask`, askData); }
++      catch (error) {
++        // Roll back only our unpublished slot. If rollback also fails, retain
++        // correlation and allow retry of this exact question, not a second one.
++        questionPublicationFailed = true;
++        try {
++          unlinkSync(`${sessionFile}.pending-question`);
++          pendingQuestion = null; awaitingAnswer = false; questionPublicationFailed = false;
++        } catch (rollbackError) {
++          throw new AggregateError([error, rollbackError], "Question publication and rollback failed; retry the same question");
++        }
++        throw error;
++      }
++      recorder.askQuestion();
+ 
+       return {
+         content: [
+@@ -384,7 +505,7 @@ export default function (pi: ExtensionAPI) {
+               "assume an answer. Their reply will arrive as your next message.",
+           },
+         ],
+-        details: { question: params.question },
++        details: askData,
+       };
+     },
+ 
+diff --git a/test/test.ts b/test/test.ts
+index a2a1a95..63d8122 100644
+--- a/test/test.ts
++++ b/test/test.ts
+@@ -325,8 +325,9 @@ describe("session.ts", () => {
+ 
+   describe("subagent loadout snapshot", () => {
+     const sample: SubagentLoadout = {
++      deliveryRole: null,
+       agent: "worker",
+-      toolAllowlist: "read,write,edit,safe_bash,web_search,subagent,ask_question",
++      toolAllowlist: "read,write,edit,safe_bash,web_search,subagent,subagent_message,subagents_list,ask_question",
+       model: "openrouter/z-ai/glm-5.2",
+       thinking: "medium",
+       systemPromptMode: "append",
+@@ -1290,8 +1291,9 @@ describe("subagent discovery", () => {
+       testApi.applySandboxToParts(
+         parts,
+         {
++          deliveryRole: null,
+           agent: "worker",
+-          toolAllowlist: "read,write,safe_bash",
++          toolAllowlist: "read,write,safe_bash,ask_question,subagent,subagent_message,subagents_list",
+           model: "openrouter/z-ai/glm-5.2",
+           thinking: "medium",
+           systemPromptMode: "append",
+@@ -1304,9 +1306,10 @@ describe("subagent discovery", () => {
+         { artifactDir: d, name: "worker" },
+       );
+       const joined = parts.join(" ");
+-      // Model with thinking suffix.
++      // Model selection and thinking are independent CLI arguments.
+       assert.ok(joined.includes("--model"), "expected --model");
+-      assert.ok(joined.includes("openrouter/z-ai/glm-5.2:medium"), "expected model:thinking");
++      assert.ok(joined.includes("openrouter/z-ai/glm-5.2"));
++      assert.equal(parts[parts.indexOf("--thinking") + 1], "'medium'");
+       // Identity written to a file and appended.
+       assert.ok(joined.includes("--append-system-prompt"), "expected --append-system-prompt");
+       // Default-deny restriction.
+@@ -1327,6 +1330,7 @@ describe("subagent discovery", () => {
+       testApi.applySandboxToParts(
+         parts,
+         {
++          deliveryRole: null,
+           agent: null,
+           toolAllowlist: null,
+           model: null,
+@@ -1682,20 +1686,28 @@ describe("subagent-done.ts", () => {
+         const tool = tools.find((t) => t.name === "ask_question");
+         await tool.execute("c1", { question: "v1 or v2?" }, undefined, undefined, { shutdown() {} });
+       };
+-      return { emit, ask, restore };
++      const reply = () => {
++        const question = JSON.parse(readFileSync(`${sessionFile}.pending-question`, "utf8"));
++        emit("input", {text:"PI_SUBAGENT_REPLY " + JSON.stringify({runId:question.runId,questionId:question.questionId,message:"Use v2"})});
++      };
++      return { emit, ask, reply, restore };
+     }
+ 
+     it("exits (does not park) when the reply arrives mid-run via input", async () => {
+       const dir = createTestDir();
+-      const { emit, ask, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
++      const { emit, ask, reply, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
+       try {
+         emit("agent_start");
+         await ask(); // sets awaitingAnswer mid-run
+-        // Reply arrives MID-RUN as a steer: input fires, no new agent_start.
+-        emit("input");
++        // Matching reply arrives MID-RUN: no new agent_start.
++        reply();
+         let shutdown = false;
+-        emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
+-        assert.equal(shutdown, true, "reply consumed mid-run → agent_end should exit, not park");
++        const ctx = { shutdown() { shutdown = true; } };
++        emit("agent_end", { messages: [] }, ctx);
++        assert.equal(shutdown, false, "agent_end is not terminal");
++        emit("agent_before_settle", { outcome: "completed" }, ctx);
++        emit("agent_settled", {}, ctx);
++        assert.equal(shutdown, true, "reply consumed mid-run → settlement should exit, not park");
+       } finally {
+         restore();
+         rmSync(dir, { recursive: true, force: true });
+@@ -1710,7 +1722,10 @@ describe("subagent-done.ts", () => {
+         await ask();
+         // No input yet — the orchestrator has not replied.
+         let shutdown = false;
+-        emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
++        const ctx = { shutdown() { shutdown = true; } };
++        emit("agent_end", { messages: [] }, ctx);
++        emit("agent_before_settle", { outcome: "completed" }, ctx);
++        emit("agent_settled", {}, ctx);
+         assert.equal(shutdown, false, "pending question with no reply must park, not exit");
+       } finally {
+         restore();
+@@ -1718,21 +1733,28 @@ describe("subagent-done.ts", () => {
+       }
+     });
+ 
+-    it("exits when the reply arrives as a new turn (agent_start also clears the flag)", async () => {
++    it("exits after a matching reply starts a new turn (automatic starts do not acknowledge)", async () => {
+       const dir = createTestDir();
+-      const { emit, ask, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
++      const { emit, ask, reply, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
+       try {
+         emit("agent_start");
+         await ask();
+         let shutdown1 = false;
+-        emit("agent_end", { messages: [] }, { shutdown() { shutdown1 = true; } });
++        const ctx1 = { shutdown() { shutdown1 = true; } };
++        emit("agent_end", { messages: [] }, ctx1);
++        emit("agent_before_settle", { outcome: "completed" }, ctx1);
++        emit("agent_settled", {}, ctx1);
+         assert.equal(shutdown1, false, "parks while waiting");
+-        // Reply arrives as a fresh turn after the subagent had parked.
+-        emit("input");
++        // Matching reply arrives after the subagent had parked.
++        reply();
+         emit("agent_start");
+         let shutdown2 = false;
+-        emit("agent_end", { messages: [] }, { shutdown() { shutdown2 = true; } });
+-        assert.equal(shutdown2, true, "after the reply turn, agent_end should exit");
++        const ctx2 = { shutdown() { shutdown2 = true; } };
++        emit("agent_end", { messages: [] }, ctx2);
++        assert.equal(shutdown2, false, "reply loop end is not terminal");
++        emit("agent_before_settle", { outcome: "completed" }, ctx2);
++        emit("agent_settled", {}, ctx2);
++        assert.equal(shutdown2, true, "after the reply turn, settlement should exit");
+       } finally {
+         restore();
+         rmSync(dir, { recursive: true, force: true });
+@@ -1897,7 +1919,7 @@ describe("tool registration", () => {
+     assert.match(output, /\(unnamed\)/);
+   });
+ 
+-  it("registers subagent_message with name + message both required (name-only addressing)", () => {
++  it("registers name-addressed subagent_message with correlated replies and owned controls", () => {
+     const { api, registeredTools } = createMockExtensionApi();
+     (subagentsModule as any).default(api);
+ 
+@@ -1907,15 +1929,15 @@ describe("tool registration", () => {
+     const props = messageTool.parameters.properties;
+     assert.deepEqual(
+       Object.keys(props).sort(),
+-      ["message", "name"],
+-      "only name/message should remain (sessionId dropped)",
++      ["action", "message", "name", "questionId", "runId"],
++      "bounded correlation and owned interruption controls",
+     );
+     assert.equal(props.message.type, "string");
+     assert.equal(props.name.type, "string");
+     assert.deepEqual(
+       messageTool.parameters.required?.slice().sort(),
+-      ["message", "name"],
+-      "name and message should both be required",
++      ["name"],
++      "name required; pause/stop do not need a work message",
+     );
+     assert.equal(props.sessionId, undefined, "sessionId should be removed");
+     assert.equal(props.autoExit, undefined, "autoExit knob should be removed");
+@@ -2652,6 +2674,108 @@ describe("subagent display helpers", () => {
+   });
+ });
+ 
++describe("Phase A delivery regressions", () => {
++  const base = {deliveryRole:null, agent:"worker", toolAllowlist:"read,ask_question", model:null, thinking:null,
++    systemPromptMode:null, identity:null, spawnable:null, autoExit:true, cwd:null, agentDir:null};
++  it("requires every saved capability field, including explicit legacy/delivery distinction", () => {
++    withTempDir(dir => {
++      const file=join(dir,"schema.jsonl");
++      for(const key of Object.keys(base)) {
++        const incomplete={...base};delete incomplete[key];
++        writeFileSync(loadoutSidecarPath(file),JSON.stringify(incomplete));assert.equal(readSubagentLoadout(file),null,key);
++      }
++      for(const thinking of ["impossible",1,""]) {
++        writeFileSync(loadoutSidecarPath(file),JSON.stringify({...base,thinking}));assert.equal(readSubagentLoadout(file),null);
++      }
++    });
++  });
++  it("replays independent thinking, including max, with no explicit model", () => {
++    withTempDir(dir => {
++      for (const thinking of ["high", "max"]) {
++        const file=join(dir,thinking+".jsonl"); const snapshot={...base,thinking};
++        writeSubagentLoadout(file,snapshot); const saved=readSubagentLoadout(file);
++        assert.deepEqual(saved,snapshot);
++        const parts:string[]=[]; (subagentsModule as any).__test__.applySandboxToParts(parts,saved,{artifactDir:dir,name:thinking});
++        assert.ok(!parts.includes("--model")); assert.equal(parts[parts.indexOf("--thinking")+1],shellEscape(thinking));
++      }
++    });
++  });
++  it("delivery profiles fail closed on extra capabilities and preserve default-deny flags", () => {
++    withTempDir(dir => {
++      for(const [deliveryRole,toolAllowlist] of Object.entries({builder:"read,grep,find,ls,bash,edit,write,ask_question",validator:"read,grep,find,ls,bash,ask_question",reviewer:"read,grep,find,ls,ask_question"})) {
++        const file=join(dir,deliveryRole+".jsonl"); const snapshot={...base,deliveryRole,toolAllowlist};
++        writeSubagentLoadout(file,snapshot as any); const parts:string[]=[];
++        (subagentsModule as any).__test__.applySandboxToParts(parts,readSubagentLoadout(file),{artifactDir:dir,name:deliveryRole});
++        for(const flag of ["--no-extensions","--no-mcp","--no-skills","--no-prompt-templates","--no-themes","--no-context-files"]) assert.ok(parts.includes(flag));
++        assert.ok(!parts.includes("-e"),"only caller-approved child control is loaded");
++        writeSubagentLoadout(file,{...snapshot,toolAllowlist:toolAllowlist+",subagent"} as any); assert.equal(readSubagentLoadout(file),null);
++      }
++    });
++  });
++  async function childProbe(fn:any) {
++    const dir=createTestDir(), file=join(dir,"session.jsonl");
++    const saved=Object.fromEntries(["PI_SUBAGENT_SESSION","PI_SUBAGENT_ID","PI_SUBAGENT_AUTO_EXIT"].map(k=>[k,process.env[k]]));
++    process.env.PI_SUBAGENT_SESSION=file;process.env.PI_SUBAGENT_ID="phase-a-run";process.env.PI_SUBAGENT_AUTO_EXIT="1";
++    const handlers=new Map<string,any[]>(), tools=new Map<string,any>(), commands=new Map<string,any>();
++    let shutdowns=0,aborts=0;
++    const ctx={shutdown(){shutdowns++;},abort(){assert.equal(JSON.parse(readFileSync(file+".interrupt","utf8")).runId,"phase-a-run");aborts++;}};
++    subagentDoneExtension({on(name:any,fn:any){handlers.set(name,[...(handlers.get(name)??[]),fn]);},registerTool(t:any){tools.set(t.name,t);},registerCommand(name:any,cmd:any){commands.set(name,cmd);},registerShortcut(){}} as any);
++    const emit=async(name:string,event:any={})=>{for(const h of handlers.get(name)??[]) await h(event,ctx);};
++    const settle=async()=>{await emit("agent_end",{messages:[{role:"assistant",stopReason:"stop"}]});await emit("agent_before_settle",{outcome:"completed"});await emit("agent_settled");};
++    try {await fn({file,emit,settle,ctx,tools,commands,counts:()=>({shutdowns,aborts})});}
++    finally {for(const [k,v] of Object.entries(saved))restoreEnvVar(k,v);rmSync(dir,{recursive:true,force:true});}
++  }
++  it("owned pause latches before abort, survives automatic recovery, and needs explicit re-arm", async()=>{
++    await childProbe(async({file,emit,settle,ctx,commands,counts}:any)=>{
++      await emit("agent_start");
++      await commands.get("subagent-control").handler("phase-a-run pause",ctx);
++      assert.equal(counts().aborts,1);
++      await emit("agent_start");assert.equal(counts().aborts,2,"paused recovery must abort without clearing intent");await emit("input",{text:"unrelated"});await settle();assert.equal(counts().shutdowns,0);assert.ok(!existsSync(file+".exit"));
++      await emit("input",{text:'PI_SUBAGENT_WORK '+JSON.stringify({runId:"phase-a-run",message:"Explicit new work"})});
++      await emit("agent_start");await settle();assert.equal(counts().shutdowns,1);
++      // Post-commit interruption cannot change the completed outcome.
++      await commands.get("subagent-control").handler("phase-a-run pause",ctx);assert.equal(counts().aborts,2);
++    });
++  });
++  it("failed .ask rename after pending persistence rolls back and permits a fresh question", async()=>{
++    await childProbe(async({file,tools,ctx,emit,settle,counts}:any)=>{
++      const ask=tools.get("ask_question");
++      await assert.rejects(()=>ask.execute("blank",{question:"  "},undefined,undefined,ctx),/blank/);
++      assert.ok(!existsSync(file+".pending-question"));
++      mkdirSync(file+".ask"); // Failure specifically at final publication, not pending write.
++      await assert.rejects(()=>ask.execute("failed",{question:"First?"},undefined,undefined,ctx),/EISDIR/);
++      assert.ok(!existsSync(file+".pending-question"),"unpublished pending state rolled back");
++      rmSync(file+".ask",{recursive:true});
++      const result=await ask.execute("retry",{question:"Second?"},undefined,undefined,ctx);
++      await assert.rejects(()=>ask.execute("duplicate",{question:"Third?"},undefined,undefined,ctx),/already pending/);
++      await emit("input",{text:'PI_SUBAGENT_REPLY '+JSON.stringify({...result.details,questionId:"wrong",message:"No"})});
++      await settle();assert.equal(counts().shutdowns,0);
++      await emit("input",{text:'PI_SUBAGENT_REPLY '+JSON.stringify({...result.details,message:"Yes"})});
++      await settle();assert.equal(counts().shutdowns,1);
++    });
++  });
++  it("child control aborts and retains cancellation when interruption persistence fails", async()=>{
++    await childProbe(async({file,commands,ctx,settle,counts}:any)=>{
++      mkdirSync(file+".interrupt");
++      let aborted=false;
++      await assert.rejects(()=>commands.get("subagent-control").handler("phase-a-run pause",{...ctx,abort(){aborted=true;}}),/EISDIR/);
++      assert.ok(aborted);await settle();assert.equal(counts().shutdowns,0);assert.ok(!existsSync(file+".exit"));
++    });
++  });
++  it("one atomic pending question survives unrelated input/recovery; only matching answer releases wait", async()=>{
++    await childProbe(async({file,emit,settle,ctx,tools,counts}:any)=>{
++      await emit("agent_start"); const ask=tools.get("ask_question");
++      const result=await ask.execute("ask",{question:"Which interface?"},undefined,undefined,ctx);
++      const pending=JSON.parse(readFileSync(file+".ask","utf8"));assert.deepEqual(pending,result.details);
++      await assert.rejects(()=>ask.execute("other",{question:"Another?"},undefined,undefined,ctx),/already pending/);
++      await emit("input",{text:"unrelated"});await emit("agent_start");await settle();assert.equal(counts().shutdowns,0);
++      await emit("input",{text:'PI_SUBAGENT_REPLY '+JSON.stringify({runId:"wrong",questionId:pending.questionId,message:"Answer"})});await settle();assert.equal(counts().shutdowns,0);
++      await emit("input",{text:'PI_SUBAGENT_REPLY '+JSON.stringify({runId:pending.runId,questionId:pending.questionId,message:"Answer"})});await settle();assert.equal(counts().shutdowns,1);
++      assert.ok(!existsSync(file+".pending-question"));
++    });
++  });
++});
++
+ describe("tmux.ts", () => {
+   describe("shellEscape", () => {
+     it("wraps in single quotes", () => {
