@@ -1,4 +1,4 @@
-# Minimal Pi Delivery Workflow
+# Explicit Team workflow (delivery compatibility APIs)
 
 The default one-shot workflow was accepted on 2026-10-06; its progress widget
 remains unchanged. Repository-owned tmux integration is explicit opt-in;
@@ -6,12 +6,9 @@ independent review, installation/reload, and live acceptance are separate gates.
 
 ## Goal
 
-Support everyday delivery: discuss a change, investigate it, approve a
-concrete plan, then execute autonomously within that scope.
+Pi is a thinking partner first. Use the discovery skill on demand for consequential uncertainty; synthesize existing discussion/evidence and ask only about consequential gaps. Define experiments by decision, sufficient evidence and budget; reconsider blockers and park side quests. Recommend Direct/Developer/Team with a reason and wait for the user's explicit choice. Small Direct work needs no mandatory files; Developer normally one compact approved packet and parent inspection, through the dedicated opt-in tmux `developer` tool documented in `docs/lean-workflows.md`. Never bypass existing Team launch controls.
 
-Use sequential one-shot JSON workers by default, with observed progress in the
-coordinator's terminal. An explicitly approved visible-tmux mode is available
-through the narrow delivery adapter; the current session still coordinates.
+For substantial selected Team work, synthesize Brief/Plan/Agreement and approve the actual Agreement before launching. The current session remains lead. Team means sequential fresh builder -> no-edit validator -> inspection-only reviewer. Explicitly approved visible tmux supports these fixed roles. The legacy default one-shot builder/reviewer transport remains available, but has no validator role: supply a separate fresh no-edit validator through an approved supported mechanism or leave that Team gate incomplete. No tool renaming changes authority.
 
 ## Roles and resources
 
@@ -19,7 +16,7 @@ through the narrow delivery adapter; the current session still coordinates.
 
 The main pi session remains the user's point of contact.
 
-An on-demand delivery skill guides it to:
+The on-demand `delivery` skill remains the single user-facing Team compatibility entry point, not an automatic coordinator or duplicate controller. It guides the lead to:
 - Investigate before planning.
 - Clarify requirements and expose unresolved decisions.
 - Obtain approval for the execution contract.
@@ -47,8 +44,7 @@ Commit permission must be explicit in the execution contract.
 A separate pi process receives a reviewer role prompt, the approved task,
 the diff, and validation evidence.
 
-It independently checks correctness, scope, project conventions, and
-test coverage. It reports blocking findings separately from suggestions.
+It independently checks approved customer-outcome fit and design intent as well as correctness, scope, project conventions and test coverage. Supply full applicable purpose/motivation/design/acceptance references and exact revisions to builder, no-edit validator and reviewer explicitly; denied child discovery cannot load them. It reports blocking findings separately from suggestions.
 
 It does not edit files or fix its own findings. Provide inspection tools
 only; the coordinator supplies the diff without granting shell access.
@@ -56,7 +52,11 @@ only; the coordinator supplies the diff without granting shell access.
 Role-specific skills may be added later when a reusable workflow proves
 useful. Do not create skills merely to mirror the role names.
 
-## Planning contract
+## Brief, Plan and Agreement
+
+Use `skills/delivery/references/templates/{brief,plan,agreement}.md` from the repo root. Brief preserves customer purpose, motivation, intended behavior, chosen-design reasons, evidence, scope/exclusions and observable acceptance. Plan supplies approach, bounded tasks/dependencies, exact checks, budgets, decisions and authoritative task rows. Agreement references exact approved Brief/Plan revisions and establishes execution authority. Long discovery may save a draft Brief early; it is not launch approval.
+
+Selection of Team permits preparation only. Synthesize documents from discussion, not another questionnaire. Provide a concise approval summary with the actual artifacts available; obtain explicit approval of the actual Agreement before execution. Record the exact approval and immutable content hashes or source revisions. Freeze approved scope separately from status annotations; reconcile stale references before launch. Ordinary approved edits, checks and bounded debugging do not require repeated prompts, while material purpose/scope/design/acceptance/permission/budget changes need renewed approval. See `skills/delivery/references/authority-and-state.md` for the full reference contract.
 
 Before starting execution, record and obtain approval for:
 1. Outcome, scope, and non-goals.
@@ -71,11 +71,11 @@ Material changes require renewed approval.
 
 ## Execution loop
 
-1. Investigate and draft the contract.
-2. Obtain explicit approval to execute.
-3. Run a fresh builder for the next dependency-ready task.
-4. Check its report and inspect the actual changes.
-5. Run an independent reviewer.
+1. Investigate, recommend a path, and after explicit Team selection draft Brief/Plan/Agreement.
+2. Obtain explicit approval of the actual Agreement and exact referenced inputs.
+3. Run a fresh builder for the next dependency-ready task in the approved workspace.
+4. Check its report and inspect the actual changes; run a fresh no-edit validator on the same source revision.
+5. Run a fresh independent inspection-only reviewer with full purpose/design/acceptance references and complete task-owned diff including added files.
 6. For blocking findings, understand the failure and delegate a focused fix.
 7. Re-run affected checks and review the revised change.
 8. Continue to the next task only after its gates pass.
@@ -88,13 +88,15 @@ Suggestions do not authorize extra implementation.
 
 ## First implementation boundaries
 
-- One builder at a time, working in the current project checkout.
+- One builder at a time, working only in the explicitly approved workspace; isolate staging when installed symlinks would expose unfinished changes.
 - No parallel writers, recursive delegation, or automatic worktrees.
 - Fresh worker contexts; use the configured GPT-6.1 Sol model initially.
 - Explicitly pass the approved task and relevant project rules.
 - Record a baseline of existing changes before execution.
 - Preserve unrelated changes; never use blanket staging or cleanup.
-- Keep task status and evidence in a project-local delivery record.
+- Keep task status and evidence in the agreed project-local record. The Plan is authoritative: pending, active, blocked, paused, cancelled, abandoned or accepted, with evidence/source revision and explicit lead acceptance. Retain unresolved work across retries/resume; no invented percentages.
+- The opt-in pinned todo widget is only a projection, not another scope controller. Only accepted maps to completed; label blocked/paused/cancelled/abandoned explicitly. See `docs/progress.md` for the reviewed pin, installation and supported persistence limits.
+- Narrate meaningful findings, decisions, blockers and completion, not every tool call; detailed output remains inspectable with default Pi Ctrl+O.
 - Never silently treat an incomplete or invalid worker report as success.
 - Push, PR creation, publishing, and destructive cleanup require approval.
 - Arrange approved teardown for temporary validation environments.
@@ -156,8 +158,7 @@ processes and external services can survive and still need approved teardown.
 Recorded final validation passed 40 tests using fake workers, a controlled
 widget harness, and the installed Pi extension loader without model calls.
 Independent review approved the feature. These tests are not a real terminal
-smoke test. The user's subsequent feedback is that the widget is okay for now;
-no further widget work is planned.
+smoke test. The user's subsequent feedback was that this observed-worker widget is okay for now. It is distinct from the opt-in Plan projection; observed worker transport still does not confer acceptance.
 
 ## Explicit opt-in visible tmux mode
 
@@ -168,9 +169,11 @@ broken links), and never edits settings. Keep the checkout in place. Never
 install the vendor's generic entry point. Existing control-name collisions
 refuse adapter startup before vendor ownership/abort/reload initialization.
 
-The current lead runs one builder -> one validator -> one independent reviewer.
-Use only `subagent`, `subagent_message`, `subagents_list`, registered model-only
-and sequentially at session startup. A synchronous reservation prevents sibling
+For Team the current lead runs one builder -> one validator -> one independent reviewer.
+Use `subagent`, `subagent_message`, `subagents_list`, registered model-only
+and sequentially at session startup. The separate `developer` tool launches only
+an explicitly approved standalone builder using the same runtime and slot;
+see the lean guide for its packet/approval contract, not a Team gate shortcut. A synchronous reservation prevents sibling
 launches; running/paused/waiting states retain the slot. Terminal completion
 allows another role, not automatic acceptance or automatic scheduling.
 
@@ -209,6 +212,10 @@ resumable handoffs (task/attempt, approval, revision/evidence, owned resources,
 remaining gates, next action; no secrets). Do not ask users to copy worker
 prompts. Portable repository tests use fake HOME/tmux and the installed loader,
 not live panes/provider workers; live acceptance remains a separate gate.
+
+## Durable usage and follow-ups
+
+See `docs/lean-workflows.md` for Direct/Developer/Team authority and the full retained follow-up list. Installation/rollback readiness, live behavior demonstrations and lead acceptance are later gates; static checks demonstrate structure only. No OS-sandbox or universal model-compliance guarantee is made.
 
 ## References
 

@@ -1,0 +1,10 @@
+{
+  "LICENSE": "a27661d3cc622bd85b9073c3d0b099413260b29b67042654f9d02d713f258f67",
+  "README.md": "4576cbe81c37e032b6fd05773f2fc41087adfc54b77d355fd8f43be51547d1d3",
+  "package.json": "c7e30d0f235671b7c467525bd3036a1f767a661c74c8498f38e37341f69638cd",
+  "extensions/todo.ts": "2d5dbe9fade292afa7faf35f20d24ab7762ca41208b8ace0018fa1458634cda8",
+  "src/todo.ts": "3edf77e4e94a914111fa0fa6c9cfaa9e6b9f62b7217867c7aec9fdaf95b56cfc",
+  "src/route.ts": "4ca66aa33338b2220400a69b9d8e793ff5a698c18a33b7512b5e6d4d5a1be949",
+  "src/widget.ts": "496cb514df1bfb796227319d3cf33bf2088ee4fc7b16ae0ef0c4ee5d8f78dab0",
+  "skills/todo/SKILL.md": "e046b75d3f5a243479d47caf29b5d0700b655af2e3b2cfdc322c7209bab05a57"
+}

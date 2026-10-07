@@ -1,10 +1,13 @@
-# Delegation Contract
+# Team delegation contract (stable delivery APIs)
+
+Read `authority-and-state.md` for approval/revision and authoritative Plan rules. Team is explicitly selected; the actual Agreement and exact referenced Brief/Plan must be approved before launch. The user-facing name does not change internal APIs or authorize Developer through delivery-only controls. Standalone Developer uses only the dedicated `developer` tool from the same opt-in tmux adapter, with explicit Developer selection and approved compact packet references; see `../../../docs/lean-workflows.md` relative to this reference directory for the exact invocation. It shares Team ownership/control, not Team launch authority; no full Team documents are required.
 
 ## Builder packet
 
 - Task ID and attempt number.
 - Explicit statement that the user approved this task's execution.
-- Outcome, scope, non-goals, and acceptance criteria.
+- Full applicable approved Brief purpose, motivation, design reasoning, experiment evidence and acceptance outcomes, with exact paths/revisions/hashes and identified readers. Supply accessible text or absolute paths explicitly; denied child discovery cannot load them for you.
+- Outcome, scope, non-goals, and acceptance criteria tied to those references.
 - Relevant code paths, investigation evidence, and project rules.
 - Completed dependencies and relevant prior decisions.
 - Git root, branch, and baseline of pre-existing changes.
@@ -16,9 +19,17 @@
 Provide enough context to work independently; do not copy the entire
 planning conversation or include unrelated tasks.
 
+## Validator packet
+
+- Approved task, full applicable Brief/design/Agreement references with exact revisions, project rules and acceptance outcomes.
+- Baseline, complete task-owned diff including added files, actual source revision/hashes and builder evidence.
+- Exact checks and allowed environment actions; no edit/write authority (shell is not an OS sandbox).
+- Report commands/exits/counts/skips, evidence per criterion, failures and gaps. Missing or unexecuted checks are not passes.
+
 ## Reviewer packet
 
 - Approved task and applicable project rules.
+- Full applicable approved purpose/design/acceptance references, exact revisions and relevant experiment evidence; inspect outcome fit, not just artifacts or code correctness.
 - Baseline identifying the task's starting repository state.
 - Complete task diff, including added/untracked task files.
 - Relevant builder report and validation evidence.
@@ -57,7 +68,7 @@ Default one-shot behavior above is unchanged. Approve the visible mode and
 installation separately; `bash install.sh --with-delivery-tmux` adds the narrow
 adapter, never the generic upstream entry point. The lead stays in the current
 persistent tmux session, launching builder -> validator -> independent reviewer
-with the three model-only sequential controls. No automatic role scheduler,
+with the three Team model-only sequential controls. The separate `developer` launch tool shares the same single slot and fixed builder runtime. Do not use it to launch a validator/reviewer or waive Team's independent gates. No automatic role scheduler,
 acceptance, parallel workers, nesting, custom/override profiles, or CLI path.
 
 For every phase supply the complete approved packet and explicit role rules.
@@ -94,7 +105,8 @@ explicit acceptance; do not ask the user to ferry prompts between roles.
 - Match validation evidence to the reviewed revision.
 - Treat missing, malformed, interrupted, or ambiguous reports as incomplete.
 - A completed builder report is not independent acceptance.
-- Require acceptance evidence and reviewer approval before closing a task.
+- Require fresh no-edit validation, independent reviewer approval and customer-outcome evidence on the same source revision, then explicit lead acceptance and owned-resource reconciliation before closing a task.
+- Maintain pending/active/blocked/paused/cancelled/abandoned/accepted Plan rows with evidence/source revision; the opt-in widget is only a projection. Retain unresolved work; no invented percentages.
 - Keep unresolved findings visible across fix cycles.
 - After two fix cycles, escalate remaining blockers to the user.
 

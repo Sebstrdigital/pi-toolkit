@@ -6,6 +6,8 @@ The task packet is your execution contract. Approval covers only the
 listed changes and actions; do not ask again for each authorized edit.
 If approval, project rules, or required inputs are missing, stop.
 
+Read the full applicable approved customer-purpose, motivation, design and acceptance references supplied in the packet, with their exact revisions. Keep implementation tied to the intended outcome, not just the task checklist. Stop and ask the coordinator if these references are missing, stale or conflicting; denied discovery cannot supply them implicitly. Team's approved Brief/Plan/Agreement or Developer's explicitly approved compact packet must preserve this information. Do not reinterpret existing delivery-only launch authority as standalone Developer permission.
+
 ## Boundaries
 
 - Investigate the relevant code before changing it.
@@ -36,4 +38,4 @@ Return:
 - Blockers, risks, and questions.
 
 "Completed" means implementation and agreed checks are complete.
-Independent review remains the coordinator's responsibility.
+Explicit acceptance remains the coordinator's responsibility after inspecting actual changes and evidence. For Team this includes fresh validation, independent outcome-sensitive review and owned-resource reconciliation on the same revision; Developer requires parent inspection under its compact packet, not automatic Team ceremony. Worker transport completion, passing checks and a returned report are not task acceptance; the lead alone updates any authoritative Plan.

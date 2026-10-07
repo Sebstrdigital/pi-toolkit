@@ -18,7 +18,7 @@ async function hostPath() {
   }
 }
 
-for (const scenario of ["registration", "collision", "non-tmux", "reservation-pause-reply", "child-input-reply-rearm", "failure-rollback", "saved-resume", "timeout", "shutdown", "persistence-failure", "roles", "old-owned", "unresolved-owned", "cleanup-retry", "pause-exit-timeout"] as const) {
+for (const scenario of ["registration", "collision", "non-tmux", "reservation-pause-reply", "child-input-reply-rearm", "failure-rollback", "saved-resume", "timeout", "shutdown", "persistence-failure", "roles", "old-owned", "unresolved-owned", "cleanup-retry", "pause-exit-timeout", "developer-admission", "developer-registration", "developer-collision", "developer-non-tmux", "developer-reservation-pause-reply", "developer-child-input-reply-rearm", "developer-failure-rollback", "developer-saved-resume", "developer-timeout", "developer-shutdown", "developer-persistence-failure", "developer-unresolved-owned", "developer-cleanup-retry", "developer-pause-exit-timeout", "developer-provenance", "developer-stop", "developer-correlation-live", "developer-correlation-terminal", "legacy-team"] as const) {
   test(`delivery installed loader: ${scenario}`, async t => {
     const dir = await mkdtemp(join(tmpdir(), "delivery-tmux-integration-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
@@ -49,7 +49,11 @@ esac
       import {readFileSync,writeFileSync,existsSync,unlinkSync} from 'node:fs';
       const {loadExtensions} = await import(${JSON.stringify(join(host, "dist/core/extensions/loader.js"))});
       const {createEventBus} = await import(${JSON.stringify(join(host, "dist/core/event-bus.js"))});
-      const dir=${JSON.stringify(dir)}, scenario=${JSON.stringify(scenario)};
+      const dir=${JSON.stringify(dir)}, variant=${JSON.stringify(scenario)};
+      const developer=variant.startsWith('developer-'), scenario=developer?variant.slice('developer-'.length):variant;
+      const authority={selection:'Developer',approvalRef:'user-selection-and-task-approval#1',packetRef:'compact-packet#sha256',
+        packet:{purpose:'Customer outcome',scope:'Only fixture edits; no commit/install/outward actions',allowedPaths:dir+'/fixture',
+          projectRules:'No delegation. Read supplied rules.',baseline:'Fixture baseline revision',validation:'node --test fixture',acceptance:'Parent inspects result',task:'No actual worker.'}};
       const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
       const childCountKey=Symbol.for('pi-subagents/running-children-count');
       const upstreamChildCount=()=>7;
@@ -76,7 +80,7 @@ esac
       const extension=loaded.extensions[0], entries=[], messages=[];
       assert.equal(extension.tools.size,0,'Registration deferred until public actions are bound');
       const runtime=loaded.runtime;
-      runtime.getAllTools=()=> scenario==='collision' ? [{name:'subagent_message'}] : [...extension.tools.keys()].map(name=>({name}));
+      runtime.getAllTools=()=> scenario==='collision' ? [{name:developer?'developer':'subagent_message'}] : [...extension.tools.keys()].map(name=>({name}));
       runtime.getThinkingLevel=()=> 'medium';
       runtime.appendEntry=(customType,data)=>{ if(scenario==='persistence-failure') throw new Error('storage failed'); entries.push({type:'custom',customType,data:structuredClone(data)}); };
       runtime.sendMessage=(message)=>messages.push(message);
@@ -93,11 +97,12 @@ esac
         assert.equal(upstreamAbort.signal.aborted,false); assert.equal(upstreamOwnership.size,1);
       } else {
         await start(extension);
-        assert.deepEqual([...extension.tools.keys()].sort(),['subagent','subagent_message','subagents_list'].sort());
+        assert.deepEqual([...extension.tools.keys()].sort(),['developer','subagent','subagent_message','subagents_list'].sort());
         assert.equal(extension.commands.size,0);
         for(const tool of extension.tools.values()) {assert.equal(tool.definition.exposure,'model-only');assert.equal(tool.definition.executionMode,'sequential');}
-        const call=(name,args,context=ctx)=>extension.tools.get(name).definition.execute('id',args,undefined,undefined,context);
-        const launch=(extra={})=>call('subagent',{agent:'builder',name:'owned',task:'No actual worker.',...extra});
+        const rawCall=(name,args,context=ctx)=>extension.tools.get(name).definition.execute('id',args,undefined,undefined,context);
+        const call=(name,args,context=ctx)=>rawCall(name,developer&&name==='subagent_message'?{approvalRef:authority.approvalRef,packetRef:authority.packetRef,...args}:args,context);
+        const launch=(extra={})=>developer?rawCall('developer',{...authority,name:'owned',...extra}):call('subagent',{agent:'builder',name:'owned',task:'No actual worker.',...extra});
         if(scenario==='old-owned') {
           await assert.rejects(call('subagent',{agent:'builder',task:'No worker'}),/unavailable/);
           await stop(extension);assert.equal(existsSync(process.env.FAKE_LOG),false);
@@ -107,8 +112,19 @@ esac
         assert.deepEqual(list.details.agents.map(a=>a.name),['builder','validator','reviewer']);
         assert.ok(list.details.agents.every(a=>a.source==='package'&&!a.cli&&!a.subagentAgents));
         assert.doesNotMatch(JSON.stringify(list),/UNAPPROVED/);
-        await assert.rejects(launch({agent:'unrestricted'}),/fixed delivery/);
-        await assert.rejects(launch({cwd:'/forbidden'}),/fixed delivery/);
+        await assert.rejects(launch({agent:'unrestricted'}),developer?/no overrides/:/fixed delivery/);
+        await assert.rejects(launch({cwd:'/forbidden'}),developer?/no overrides/:/fixed delivery/);
+        if(scenario==='admission') {
+          const schema=extension.tools.get('developer').definition.parameters;
+          assert.equal(schema.additionalProperties,false);assert.equal(schema.properties.packet.additionalProperties,false);
+          assert.deepEqual(schema.required.sort(),['selection','approvalRef','packetRef','packet'].sort());
+          for(const extra of [{selection:'Team'},{selection:undefined},{approvalRef:''},{approvalRef:'  '},{packetRef:''},{packet:undefined},
+            {packet:{...authority.packet,baseline:''}},{packet:{...authority.packet,role:'reviewer'}},
+            ...['agent','role','cwd','tools','grants','cli','model','thinking','task'].map(key=>({[key]:'forbidden'}))]) {
+            await assert.rejects(launch(extra),/Developer requires/);
+          }
+          assert.equal(existsSync(process.env.FAKE_LOG),false,'Rejected authority/overrides create no pane');
+        }
         const {mkdirSync}=await import('node:fs');mkdirSync(dir+'/artifacts/parent',{recursive:true});
         writeFileSync(dir+'/artifacts/parent/subagent-registry.json',JSON.stringify({external:{sessionFile:dir+'/external.jsonl',sessionId:'external'}}));
         await assert.rejects(call('subagent_message',{name:'external',message:'adopt'}),/not owned/);
@@ -135,9 +151,23 @@ esac
           if(scenario==='timeout'||scenario==='pause-exit-timeout') globalThis.setTimeout=(fn,ms,...args)=>realTimeout(fn,ms===1200000?(scenario==='timeout'?30:1500):ms,...args);
           const pending=launch();
           await assert.rejects(launch({name:'sibling'}),/already active/);
+          await assert.rejects(developer?rawCall('subagent',{agent:'reviewer',name:'team-overlap',task:'No worker'}):rawCall('developer',{...authority,name:'developer-overlap'}),/already active/);
           const result=await pending; assert.equal(result.details.status,'started');
           const record=entries.find(e=>e.customType==='delivery-tmux-owned-v1').data;
-          assert.equal(record.version,1); assert.equal(record.loadout.model,'approved/model'); assert.equal(record.loadout.thinking,'medium');
+          assert.equal(record.version,1);
+          assert.deepEqual(record.workflow,developer?{kind:'developer',approvalRef:authority.approvalRef,packetRef:authority.packetRef}:{kind:'team'});
+          if(developer) {
+            for(const args of [{name:'owned',message:'unapproved new work'}, {name:'owned',action:'rearm',message:'unapproved rearm'},
+              {name:'owned',message:'wrong authority',approvalRef:'Team Agreement',packetRef:authority.packetRef}]) {
+              await assert.rejects(rawCall('subagent_message',args),/original approved packet/);
+            }
+            const taskFiles=(await import('node:fs')).readdirSync(dir+'/artifacts/parent/context');
+            const task=taskFiles.map(file=>readFileSync(dir+'/artifacts/parent/context/'+file,'utf8')).find(text=>text.includes('Standalone Developer:'));
+            assert.ok(task);for(const field of Object.values(authority.packet))assert.ok(task.includes(field));
+            assert.ok(task.includes(authority.approvalRef)&&task.includes(authority.packetRef));
+            assert.match(task,/No Team artifact set is required/);
+          }
+          assert.equal(record.loadout.model,'approved/model'); assert.equal(record.loadout.thinking,'medium');
           assert.equal(record.resources.deny.length,6);
           const {fileURLToPath}=await import('node:url');
           assert.equal(fileURLToPath(record.resources.control),${JSON.stringify(join(root, "vendor/pi-interactive-subagents/pi-extension/subagents/subagent-done.ts"))});
@@ -147,7 +177,49 @@ esac
           assert.doesNotMatch(script,/UNAPPROVED|claude|PI_SUBAGENT_ALLOWED/);
           assert.match(script,/read,grep,find,ls,bash,edit,write,ask_question/);
           const header=JSON.stringify({type:'session',version:3,id:'child',cwd:dir})+'\\n';writeFileSync(record.sessionFile,header);
-          if(scenario==='child-input-reply-rearm') {
+          if(scenario==='correlation-live'||scenario==='correlation-terminal') {
+            const terminal=scenario==='correlation-terminal';
+            if(terminal) {
+              writeFileSync(process.env.DONE_FILE,'done');await sleep(1200);unlinkSync(process.env.DONE_FILE);
+              assert.equal(entries.at(-1).data.state,'completed');
+            } else {
+              await rawCall('subagent_message',{name:'owned',action:'pause'});
+              writeFileSync(record.sessionFile+'.pending-question',JSON.stringify({type:'question',runId:record.id,questionId:'q',question:'Which?',name:'owned',agent:'builder'}));
+            }
+            const snapshot=()=>({log:readFileSync(process.env.FAKE_LOG,'utf8'),entries:JSON.stringify(entries),messages:JSON.stringify(messages),
+              panes:readFileSync(process.env.FAKE_LOG+'.count','utf8'),
+              question:existsSync(record.sessionFile+'.pending-question')?readFileSync(record.sessionFile+'.pending-question','utf8'):null,
+              interrupt:existsSync(record.sessionFile+'.interrupt')?readFileSync(record.sessionFile+'.interrupt','utf8'):null});
+            const before=snapshot();
+            for(const correlation of [{runId:''},{questionId:''},{runId:'',questionId:''},
+              {runId:record.id},{questionId:'q'},{runId:' ',questionId:'q'},{runId:record.id,questionId:'  '},
+              {runId:null,questionId:'q'},{runId:record.id,questionId:null},
+              {runId:'\\0',questionId:'q'},{runId:record.id,questionId:'\\0'}]) {
+              for(const refs of [{},{approvalRef:authority.approvalRef,packetRef:authority.packetRef}]) {
+                await assert.rejects(rawCall('subagent_message',{name:'owned',message:'Unauthorized follow-up',...correlation,...refs}),/Correlation requires both nonempty/);
+                assert.deepEqual(snapshot(),before,'Malformed correlation cannot deliver input, create panes, alter entries/messages or question/interruption state');
+              }
+            }
+            if(terminal) {
+              await assert.rejects(rawCall('subagent_message',{name:'owned',message:'stale',runId:record.id,questionId:'q'}),/stale|no longer active/i);
+              assert.deepEqual(snapshot(),before,'Stale valid-shaped reply cannot resume terminal ownership');
+              await assert.rejects(rawCall('subagent_message',{name:'owned',message:'New work without refs'}),/original approved packet/);
+              assert.deepEqual(snapshot(),before);
+              const resumed=await call('subagent_message',{name:'owned',message:'Approved bounded follow-up'});
+              assert.equal(resumed.details.status,'started');assert.equal(resumed.details.sessionFile,record.sessionFile);
+              assert.equal(entries.at(-1).data.workflow.kind,'developer');
+            } else {
+              await assert.rejects(launch({name:'correlation-sibling'}),/already active/);
+              assert.deepEqual(snapshot(),before,'Malformed rejection retains paused slot and watcher');
+              await assert.rejects(rawCall('subagent_message',{name:'owned',message:'wrong',runId:record.id,questionId:'wrong'}),/does not match/);
+              assert.deepEqual(snapshot(),before,'Exact pending IDs still required');
+              await rawCall('subagent_message',{name:'owned',message:'answer',runId:record.id,questionId:'q'});
+              assert.equal(entries.at(-1).data.state,'paused','Valid reply without authority refs preserves pause');
+              await assert.rejects(launch({name:'after-valid-reply'}),/already active/);
+              await call('subagent_message',{name:'owned',action:'rearm',message:'Approved separate new work'});
+              assert.equal(entries.at(-1).data.state,'running','Preserved watcher supports explicit authorized rearm');
+            }
+          } else if(scenario==='child-input-reply-rearm') {
             // Load the actual accepted child extension, not a metadata-only mock.
             // Its exported factory captures this controlled child's environment.
             Object.assign(process.env,{PI_SUBAGENT_SESSION:record.sessionFile,PI_SUBAGENT_ID:record.id,
@@ -223,6 +295,35 @@ esac
             await call('subagent_message',{name:'owned',action:'rearm',message:'Explicit new work'});
             assert.equal(entries.at(-1).data.state,'running');
             await assert.rejects(call('subagent_message',{name:'owned',message:'wrong parent'},{...ctx,sessionManager:{...ctx.sessionManager,getSessionId:()=> 'other'}}),/unavailable/);
+          } else if(scenario==='provenance'||scenario==='legacy-team') {
+            writeFileSync(process.env.DONE_FILE,'done');await sleep(1200);unlinkSync(process.env.DONE_FILE);
+            assert.equal(entries.at(-1).data.state,'completed');
+            const latest=entries.at(-1).data;
+            if(scenario==='legacy-team') {
+              for(const entry of entries) delete entry.data.workflow;
+              await start(extension);
+              await assert.rejects(rawCall('subagent_message',{name:'owned',message:'convert',approvalRef:authority.approvalRef,packetRef:authority.packetRef}),/cannot convert/);
+              const resumed=await rawCall('subagent_message',{name:'owned',message:'Legacy Team approved follow-up'});
+              assert.equal(resumed.details.status,'started');assert.deepEqual(entries.at(-1).data.workflow,{kind:'team'});
+            } else {
+              for(const bad of [null,{},'developer',{kind:'unknown'},{kind:'developer',approvalRef:'',packetRef:'packet'},
+                {kind:'developer',approvalRef:'approval',packetRef:'packet',extra:true},{kind:'team',approvalRef:'approval'}]) {
+                latest.workflow=bad;
+                await start(extension);
+                await assert.rejects(launch({name:'malformed'}),/unavailable/);
+                await assert.rejects(rawCall('subagent_message',{name:'owned',message:'adopt'}),/unavailable/);
+              }
+              latest.workflow={kind:'developer',approvalRef:authority.approvalRef,packetRef:authority.packetRef};
+              // A Developer record cannot claim validator/reviewer pinned grants.
+              const savedLoadout=latest.loadout;
+              latest.loadout={...savedLoadout,agent:'reviewer',deliveryRole:'reviewer',toolAllowlist:'read,grep,find,ls,ask_question'};
+              await start(extension);await assert.rejects(launch({name:'wrong-role'}),/unavailable/);
+              latest.loadout=savedLoadout;
+              await start(extension);
+              await assert.rejects(rawCall('subagent_message',{name:'owned',message:'resume without approval'}),/original approved packet/);
+              const resumed=await call('subagent_message',{name:'owned',message:'Approved bounded follow-up'});
+              assert.equal(resumed.details.status,'started');assert.equal(entries.at(-1).data.workflow.kind,'developer');
+            }
           } else if(scenario==='saved-resume') {
             writeFileSync(process.env.DONE_FILE,'done');await sleep(1200);unlinkSync(process.env.DONE_FILE);
             assert.equal(entries.at(-1).data.state,'completed');
@@ -252,7 +353,7 @@ esac
             other.runtime.getAllTools=()=>[];other.runtime.getThinkingLevel=()=> 'medium';other.runtime.appendEntry=runtime.appendEntry;other.runtime.sendMessage=runtime.sendMessage;
             await start(other.extensions[0]);
             await assert.rejects(other.extensions[0].tools.get('subagent').definition.execute('id',{agent:'builder',task:'No worker'},undefined,undefined,ctx),/already active/);
-            await assert.rejects(other.extensions[0].tools.get('subagent_message').definition.execute('id',{name:'owned',message:'Do not adopt'},undefined,undefined,ctx),/unresolved/);
+            await assert.rejects(other.extensions[0].tools.get('subagent_message').definition.execute('id',{name:'owned',message:'Do not adopt',...(developer?{approvalRef:authority.approvalRef,packetRef:authority.packetRef}:{})},undefined,undefined,ctx),/unresolved/);
             await assert.rejects(stop(other.extensions[0]),/teardown incomplete/);
           } else if(scenario==='cleanup-retry') {
             writeFileSync(process.env.FAIL_CLEANUP,'fail');writeFileSync(process.env.DONE_FILE,'done');await sleep(1200);
@@ -261,11 +362,19 @@ esac
             await assert.rejects(stop(extension),/teardown/);
             unlinkSync(process.env.FAIL_CLEANUP);unlinkSync(process.env.DONE_FILE);
             await stop(extension);
+          } else if(scenario==='stop') {
+            await rawCall('subagent_message',{name:'owned',action:'stop'});
+            await sleep(200);
+            assert.equal(entries.at(-1).data.state,'cancelled');
+            assert.ok(messages.some(m=>m.customType==='subagent_cancelled'));
+            assert.ok(!messages.some(m=>m.details?.status==='completed'));
+            const next=await rawCall('subagent',{agent:'reviewer',name:'team-after-developer-cancel',task:'No worker'});
+            assert.equal(next.details.status,'started');assert.deepEqual(entries.at(-1).data.workflow,{kind:'team'});
           } else if(scenario==='timeout') {
             await sleep(200);assert.equal(entries.at(-1).data.state,'cancelled');
             assert.ok(messages.some(m=>m.customType==='subagent_cancelled'));
             assert.ok(!messages.some(m=>m.details?.status==='completed'));
-            const next=await launch({name:'after-timeout',agent:'reviewer'});assert.equal(next.details.status,'started');
+            const next=await launch(developer?{name:'after-timeout'}:{name:'after-timeout',agent:'reviewer'});assert.equal(next.details.status,'started');
           }
         }
         await stop(extension);await sleep(60);await stop(extension);
@@ -284,7 +393,7 @@ esac
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", program], {
       cwd: dir, encoding: "utf8", timeout: 15000,
       env: { ...process.env, HOME: dir, PI_CODING_AGENT_DIR: agent, PATH: `${bin}:/usr/bin:/bin`,
-        TMUX: scenario === "non-tmux" ? "" : "fake", TMUX_PANE: "%parent", FAKE_LOG: join(dir, "tmux.log"),
+        TMUX: scenario.endsWith("non-tmux") ? "" : "fake", TMUX_PANE: "%parent", FAKE_LOG: join(dir, "tmux.log"),
         FAIL_TRANSPORT: join(dir, "fail"), FAIL_CLEANUP: join(dir, "fail-cleanup"), DONE_FILE: join(dir, "done"), PI_OFFLINE: "1", PI_SUBAGENT_AGENT: "", PI_SUBAGENT_ALLOWED: "", PI_SUBAGENT_SHELL_READY_DELAY_MS: "40" },
     });
     assert.equal(result.status, 0, result.stderr + result.stdout);

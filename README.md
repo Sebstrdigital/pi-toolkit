@@ -6,13 +6,14 @@ Minimal personal setup for the pi coding agent.
 
 - `agent/AGENTS.md`: global approval, evidence, memory, and writing rules.
 - `skills/`: debug, grill-me, zoom-out, duadigital-pdf-maker,
-  homelab-validation, and delivery.
+  homelab-validation, discovery, and delivery (the Team compatibility name).
 - `agents/`: builder and independent reviewer role prompts.
 - `scripts/delivery-agent.ts`: sequential one-shot worker launcher with live progress.
 - `extensions/delivery-worker/`: default one-shot coordinator tool and progress widget.
 - `extensions/delivery-tmux/`: explicit opt-in visible-tmux delivery controls.
 - `vendor/pi-interactive-subagents/`: pinned MIT runtime, fixed roles, and provenance.
-- `docs/delivery-workflow.md`: delivery roles, contract, and execution loop.
+- `docs/delivery-workflow.md`: Team roles, Agreement, and execution loop.
+- `docs/lean-workflows.md`: Direct/Developer/Team usage, authority, truthful task state and retained follow-ups.
 - `AGENTS.override.md`: empty override shielding this repo from its
   Claude-specific context file.
 
@@ -37,10 +38,48 @@ Parent-directory overrides at `~/work/AGENTS.override.md` and
 `~/work/git/AGENTS.override.md` are machine-local and not installed by
 this script. An override replaces AGENTS.md/CLAUDE.md in its own directory.
 
-## Delivery
+## Choose proportionate execution
 
-Start with `/skill:delivery [request]`. The coordinator investigates,
-presents an execution contract, and waits for approval before delegation.
+Pi is a thinking partner, not an automatic Team coordinator. For consequential
+uncertainty use `/skill:discovery [question]`: synthesize existing context,
+establish the customer decision and inspect evidence before asking about gaps.
+Experiments need sufficient-evidence criteria and a proportionate budget;
+reconsider blocker relevance and park side quests.
+
+The agent recommends **Direct**, **Developer** or **Team** with a reason; the
+user explicitly chooses. Small Direct work is current-agent implementation
+with no mandatory files. Developer normally uses one compact approved packet
+and parent inspection through the dedicated model-only `developer` tool in
+the opt-in tmux adapter. It requires explicit Developer selection and task
+approval references, not full Team documents. See [the exact invocation and
+limits](docs/lean-workflows.md#standalone-developer-invocation). The default
+one-shot fallback remains Team-only; existing Team launch controls are not a
+standalone Developer shortcut.
+
+## Team (delivery compatibility entry point)
+
+After explicit Team selection, use `/skill:delivery [request]`. Keep this
+installed alias; there is no duplicate Team controller. The lead synthesizes
+Brief/Plan/Agreement from the discussion, makes the actual documents available,
+and waits for explicit approval of the actual Agreement before delegation.
+Selection authorizes preparation only. Templates live under
+`skills/delivery/references/templates/`; exact references/revisions and approval
+handling are in `skills/delivery/references/authority-and-state.md`.
+
+Ordinary in-scope work after approval needs no repeated permission. Team is
+sequential fresh builder -> no-edit validator -> inspection-only reviewer,
+with full applicable approved purpose/design/acceptance references supplied
+to each role. The lead explicitly accepts on the tested/reviewed revision;
+worker completion is never acceptance. Plan rows are authoritative, and any
+opt-in todo widget is only a projection, not a scheduler. Keep blocked,
+paused, cancelled and abandoned work visible; no invented percentages.
+Narrate meaningful findings, decisions, blockers and completion, not every
+tool call. Detailed output remains inspectable (default Pi Ctrl+O).
+See [the durable lean-workflow guide](docs/lean-workflows.md) for limits and
+follow-ups. Install the pinned progress controller and quieter display explicitly
+with `bash install.sh --with-progress --hide-thinking`; default installation does
+not change settings or load todo. See [pin, limits, backups and rollback](docs/progress.md).
+Personal installation/live readiness remain separate lead-owned gates.
 
 With the extension loaded, the coordinator can call `delivery_worker` with
 `role`, `project`, `packet`, `output`, and optional `timeout`, but only after
@@ -67,7 +106,9 @@ It uses native TypeScript execution without additional dependencies.
       --packet /absolute/task-packet.md \
       --output /absolute/delivery/task-01-builder
 
-Use `reviewer` for independent review. The output parent must already
+Use `reviewer` for independent review. This legacy one-shot transport has no
+validator role: Team still needs a separate fresh no-edit validator through an
+approved supported mechanism, or that gate is incomplete. The output parent must already
 exist; each invocation requires a new output directory. The default
 timeout is 1,800 seconds; override it with `--timeout SECONDS`.
 
@@ -125,14 +166,17 @@ This adds only the delivery adapter symlink, never the generic vendor entry
 point; conflicting files/directories/links (including dangling links) are
 refused without overwrite. No settings are changed. Keep this checkout in
 place and reload Pi. Do not enable another extension exposing `subagent`,
-`subagent_message`, or `subagents_list`: collisions refuse delivery startup
+`subagent_message`, `subagents_list`, or `developer`: collisions refuse delivery startup
 before vendor lifecycle initialization. Controls register at session start,
 not during factory loading. Runtime state is isolated from upstream instances.
 
-Use Pi inside tmux with a persistent lead session. The current lead explicitly
-runs builder -> validator -> independent reviewer, one worker at a time.
-Pass the approved packet as task text, including rules, baseline, exact checks,
-permissions, and report contract. Select the current model/thinking or specify
+Use Pi inside tmux with a persistent parent session. For Team the current lead
+explicitly runs builder -> validator -> independent reviewer, one worker at a time.
+Standalone Developer uses `developer` with a compact approved packet, only the
+fixed builder, and the same owned slot, lifecycle and resource restrictions.
+Its current-session model/thinking are retained without override fields.
+For Team, pass the approved packet as task text, including rules, baseline, exact
+checks, permissions, and report contract. Select the current model/thinking or specify
 `model` and `thinking`; no tools, cwd override, custom profiles, CLI, or nested
 spawning can be granted. Fixed bundled profiles ignore project/global agents.
 Builder: read/grep/find/ls/bash/edit/write/ask_question. Validator:
@@ -155,10 +199,15 @@ Failed closes remain owned for retry; unresolved saved active state fails closed
 `subagent_message` can resume only adapter-recorded sessions in this lead's
 branch, replaying unchanged pinned role, grants, identity, model/thinking,
 paths, and resource denials. Missing/old/changed metadata is refused; a generic
-name registry is not ownership. Saved resume is not a fresh independent review.
+name registry is not ownership. Accepted v1 records without workflow provenance
+remain legacy Team only. Unknown/malformed provenance fails closed. Developer
+follow-up work through `subagent_message` must repeat the original `approvalRef`
+and `packetRef`; correlated replies, pause and stop do not grant new work. Saved resume is not a fresh independent review.
 A terminal worker frees the slot, **not acceptance**. Inspect retained session,
-sidecars, scripts, changes, and exact check evidence; use a fresh validator and
-reviewer, bounded fix cycles, then explicit lead acceptance. Evidence can be
+sidecars, scripts, changes, and exact check evidence; for Team use a fresh validator and
+reviewer, bounded fix cycles, then explicit lead acceptance. For standalone
+Developer the parent inspects actual changes, checks, outcome fit and owned
+resources before explicitly accepting under the compact packet. Evidence can be
 sensitive. Notifications are bounded; full artifacts remain on disk. Record
 resumable Munin handoffs rather than asking the user to copy prompts.
 
@@ -180,5 +229,6 @@ Reset on 2026-10-06. The old toolkit is preserved under
 
 See [docs/pi-fresh-start.md](docs/pi-fresh-start.md) for the reconciled plan
 and current status.
-The current setup keeps global rules under 600 bytes and HomeLab guidance
-in an on-demand skill.
+The current setup keeps default policy thin and discovery, Team and HomeLab
+procedures in on-demand skills. Static guidance checks do not prove universal
+model behavior or installed release readiness.

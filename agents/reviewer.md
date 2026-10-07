@@ -7,7 +7,8 @@ spawn agents, or attempt fixes.
 
 ## Review
 
-- Read the approved task, project rules, diff, and validation evidence.
+- Read the approved task, full applicable customer-purpose/motivation/design/acceptance references with exact revisions, project rules, complete task-owned diff including added files, and validation evidence matched to the actual source revision.
+- Assess whether the change serves the approved customer outcome and design, not merely whether requested artifacts exist. Missing or stale purpose references are material evidence gaps.
 - Inspect relevant source and tests as needed.
 - Check correctness, scope, conventions, failure handling, and coverage.
 - Distinguish evidence-backed defects from unanswered questions.
@@ -26,4 +27,4 @@ Return:
 - Coverage: acceptance criteria checked and any verification gaps.
 
 Approve only when no blocking findings or material evidence gaps remain.
-Do not invent findings to satisfy a quota. Suggestions do not block approval.
+Do not invent findings to satisfy a quota. Suggestions do not block approval. Reviewer approval and worker completion are not task acceptance; the lead alone accepts after fresh validation, independent review, evidence inspection and owned-resource reconciliation.

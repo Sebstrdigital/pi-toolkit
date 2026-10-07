@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { realpathSync } from "node:fs";
+import { Type } from "typebox";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { SubagentLoadout } from "../../vendor/pi-interactive-subagents/pi-extension/subagents/session.ts";
 
@@ -10,6 +11,22 @@ const vendorPath = (name: string) => fileURLToPath(new URL(`../../vendor/pi-inte
 
 const CONTROLS = ["subagent", "subagent_message", "subagents_list"] as const;
 const ENTRY = "delivery-tmux-owned-v1";
+const CAPABILITIES = [...CONTROLS, "developer"];
+type Workflow = { kind: "team" } | { kind: "developer"; approvalRef: string; packetRef: string };
+const nonempty = (value: unknown): value is string => typeof value === "string" && !!value.trim() && !value.includes("\0");
+const isWorkflow = (value: unknown): value is Workflow => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return v.kind === "team" ? Object.keys(v).length === 1 : v.kind === "developer" &&
+    Object.keys(v).length === 3 && nonempty(v.approvalRef) && nonempty(v.packetRef);
+};
+const PACKET_FIELDS = ["purpose", "scope", "allowedPaths", "projectRules", "baseline", "validation", "acceptance", "task"] as const;
+const reference = () => Type.String({ minLength: 1 });
+const DeveloperParams = Type.Object({
+  selection: Type.Literal("Developer"), approvalRef: reference(), packetRef: reference(),
+  packet: Type.Object(Object.fromEntries(PACKET_FIELDS.map(key => [key, reference()])), { additionalProperties: false }),
+  name: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
+}, { additionalProperties: false });
 const TIMEOUT_MS = 20 * 60 * 1000;
 const RESOURCES = { control: pathToFileURL(vendorPath("subagent-done.ts")).href,
   deny: ["extensions", "mcp", "skills", "prompt-templates", "themes", "context-files"] };
@@ -23,6 +40,8 @@ interface Owned {
   loadout: SubagentLoadout;
   state: State;
   resources: typeof RESOURCES;
+  /** Absent on accepted v1 records means legacy Team, never Developer. */
+  workflow?: Workflow;
 }
 
 /** Opt-in current-session lead. No factory resources and no generic entry point. */
@@ -36,6 +55,7 @@ export default async function deliveryTmux(pi: ExtensionAPI) {
   let reserved = false;
   let active: string | undefined;
   let failed = false;
+  let launchWorkflow: Workflow | undefined;
   const owned = new Map<string, Owned>();
   const knownRuns = new Set<string>();
   const shutdown: Array<(event: any, ctx: ExtensionContext) => unknown> = [];
@@ -60,7 +80,7 @@ export default async function deliveryTmux(pi: ExtensionAPI) {
     // Public action APIs are bound here, not in the extension factory. Check
     // before initializing vendor reload/abort/ownership hooks or registering tools.
     if (!initialized) {
-      const collisions = pi.getAllTools().filter(tool => CONTROLS.includes(tool.name as any));
+      const collisions = pi.getAllTools().filter(tool => CAPABILITIES.includes(tool.name as any));
       if (collisions.length) throw new Error(`Delivery control collision: ${collisions.map(tool => tool.name).join(", ")}; existing runtime left untouched`);
     }
     context = ctx;
@@ -73,6 +93,8 @@ export default async function deliveryTmux(pi: ExtensionAPI) {
           typeof record.name !== "string" || !record.name || typeof record.id !== "string" ||
           typeof record.sessionFile !== "string" || !isSubagentLoadout(record.loadout) ||
           !record.loadout.deliveryRole || record.loadout.agent !== record.loadout.deliveryRole ||
+          (Object.hasOwn(record, "workflow") && (!isWorkflow(record.workflow) ||
+            (record.workflow.kind === "developer" && record.loadout.deliveryRole !== "builder"))) ||
           JSON.stringify(record.resources) !== JSON.stringify(RESOURCES) ||
           !["running", "paused", "completed", "cancelled", "error"].includes(record.state)) {
         failed = true; continue;
@@ -101,13 +123,13 @@ export default async function deliveryTmux(pi: ExtensionAPI) {
         }, options);
         if (key === "registerTool") return (tool: any) => {
           if (!CONTROLS.includes(tool.name)) throw new Error("Unexpected delivery control");
-          const description = tool.name === "subagent" ? "Launch one fixed delivery builder, validator, or reviewer in tmux. Model/thinking selection only; no parallel workers or nesting. Results arrive automatically; completion is not acceptance." : tool.name === "subagents_list" ? "Inspect the three fixed bundled delivery roles. No project/global overrides. Explicit inspection only, not completion polling." : "Control or resume an owned delivery session by exact name. Matching runId/questionId replies release waiting, not pause. Pause preserves the pane; rearm requires new work; stop cancels. Saved resume replays pinned grants. Results arrive automatically.";
+          const description = tool.name === "subagent" ? "Team-only: after explicit Team selection and actual Agreement approval, launch one fixed delivery builder, validator, or reviewer in tmux. Model/thinking selection only; no parallel workers or nesting. Results arrive automatically; completion is not acceptance." : tool.name === "subagents_list" ? "Inspect the three fixed bundled delivery roles. No project/global overrides. Explicit inspection only, not completion polling." : "Control or resume an owned delivery session by exact name. Matching runId/questionId replies release waiting, not pause. Pause preserves the pane; rearm requires new work; stop cancels. Saved resume replays pinned grants. Developer new work requires the original approvalRef and packetRef; replies/pause/stop do not grant new work. Results arrive automatically.";
           const parameters = tool.name === "subagent" ? { ...tool.parameters,
             properties: Object.fromEntries(Object.entries(tool.parameters.properties).filter(([name]) => name !== "cwd")),
-            additionalProperties: false } : tool.parameters;
-          target.registerTool({ ...tool, parameters, description, promptSnippet: description,
-            exposure: "model-only", executionMode: "sequential",
-            async execute(id: string, params: any, signal: any, update: any, callCtx: ExtensionContext) {
+            additionalProperties: false } : tool.name === "subagent_message" ? { ...tool.parameters,
+              properties: { ...tool.parameters.properties, approvalRef: reference(), packetRef: reference() },
+              additionalProperties: false } : tool.parameters;
+          const execute = async (id: string, params: any, signal: any, update: any, callCtx: ExtensionContext, workflow?: Workflow) => {
               assertContext(callCtx);
               const launch = tool.name === "subagent";
               const control = tool.name === "subagent_message";
@@ -123,13 +145,30 @@ export default async function deliveryTmux(pi: ExtensionAPI) {
                 if (!params.model) throw new Error("An explicit or current-session model is required");
               }
               if (control) {
-                if (Object.keys(params).some(key => !["name", "message", "runId", "questionId", "action"].includes(key))) throw new Error("Only owned delivery control fields are permitted");
+                if (Object.keys(params).some(key => !["name", "message", "runId", "questionId", "action", "approvalRef", "packetRef"].includes(key))) throw new Error("Only owned delivery control fields are permitted");
                 // A correlated answer releases waiting, never interruption. Reject
                 // ambiguous reply/rearm before touching either worker's state.
-                if (params.action === "rearm" && (Object.hasOwn(params, "runId") || Object.hasOwn(params, "questionId"))) throw new Error("Correlated reply and rearm must be separate requests");
+                const correlated = Object.hasOwn(params, "runId") || Object.hasOwn(params, "questionId");
+                if (params.action === "rearm" && correlated) throw new Error("Correlated reply and rearm must be separate requests");
+                // Presence cannot exempt ordinary work from its authority checks.
+                // Validate before transport, saved resume, or any slot/state mutation;
+                // the fixed runtime still checks exact pending run/question IDs.
+                if (correlated && (!Object.hasOwn(params, "runId") || !Object.hasOwn(params, "questionId") ||
+                    !nonempty(params.runId) || !nonempty(params.questionId))) {
+                  throw new Error("Correlation requires both nonempty runId and questionId strings; malformed replies refused");
+                }
                 record = owned.get(params.name?.trim());
                 if (!record || record.parent !== parent) throw new Error("Target is not owned by this delivery session; registry adoption refused");
                 assertPinned(record);
+                const newWork = params.action !== "pause" && params.action !== "stop" && !correlated;
+                if (record.workflow?.kind === "developer" && newWork &&
+                    (params.approvalRef !== record.workflow.approvalRef || params.packetRef !== record.workflow.packetRef)) {
+                  throw new Error("Developer new work requires original approved packet and approval references; no Team authority substitution");
+                }
+                if (record.workflow?.kind !== "developer" &&
+                    (Object.hasOwn(params, "approvalRef") || Object.hasOwn(params, "packetRef"))) {
+                  throw new Error("Developer authority cannot convert legacy/Team ownership");
+                }
                 const live = hasDeliveryRun(record.name, record.id);
                 takingSlot = !live;
                 if (!live && record.state === "paused" && params.action === "stop") {
@@ -143,6 +182,7 @@ export default async function deliveryTmux(pi: ExtensionAPI) {
                 if (reserved || active) throw new Error("One delivery worker already active/reserved (paused and waiting hold the slot)");
                 if (hasOwnedSurfaces()) throw new Error("Owned pane cleanup unresolved; refusing another worker until teardown succeeds");
                 reserved = true; // Synchronous, before the first await, including sibling calls.
+                launchWorkflow = workflow ?? record?.workflow ?? { kind: "team" };
               }
               try {
                 const result = await tool.execute(id, params, signal, update, callCtx);
@@ -160,9 +200,30 @@ export default async function deliveryTmux(pi: ExtensionAPI) {
                   }
                 }
                 throw error;
-              } finally { if (takingSlot) reserved = false; }
-            },
-          });
+              } finally { if (takingSlot) { reserved = false; launchWorkflow = undefined; } }
+          };
+          target.registerTool({ ...tool, parameters, description, promptSnippet: description,
+            exposure: "model-only", executionMode: "sequential", execute });
+          if (tool.name === "subagent") {
+            const developerDescription = "Only after explicit user Developer selection and compact task approval, launch ONE fixed builder in tmux. Supply approval/packet references and full purpose, scope/allowed paths, project rules, baseline, validation and acceptance. References are instruction-based declarations, not authentication of user consent. No Team documents required; no role/cwd/tool/CLI overrides. Current model/thinking retained. Shares Team's owned slot; results arrive automatically. Parent inspects changes/evidence and alone accepts; completion is not acceptance. Control through subagent_message.";
+            target.registerTool({ name: "developer", label: "Developer", description: developerDescription,
+              promptSnippet: developerDescription, parameters: DeveloperParams,
+              exposure: "model-only", executionMode: "sequential",
+              async execute(id, params: any, signal, update, callCtx) {
+                if (!params || Object.keys(params).some(key => !["selection", "approvalRef", "packetRef", "packet", "name"].includes(key)) ||
+                    params.selection !== "Developer" || !nonempty(params.approvalRef) || !nonempty(params.packetRef) ||
+                    !params.packet || typeof params.packet !== "object" || Array.isArray(params.packet) ||
+                    Object.keys(params.packet).length !== PACKET_FIELDS.length ||
+                    !PACKET_FIELDS.every(key => nonempty(params.packet[key]))) {
+                  throw new Error("Developer requires explicit selection, approval/packet references and a complete bounded packet; no overrides");
+                }
+                const workflow: Workflow = { kind: "developer", approvalRef: params.approvalRef, packetRef: params.packetRef };
+                const task = `Standalone Developer: implement only this approved compact packet. No Team artifact set is required. Parent alone inspects and accepts. Approval metadata is not authenticated user consent.\nApproval: ${params.approvalRef}\nPacket revision: ${params.packetRef}\n` +
+                  PACKET_FIELDS.map(key => `\n## ${key}\n${params.packet[key]}`).join("\n");
+                return execute(id, { agent: "builder", name: params.name, task }, signal, update, callCtx, workflow);
+              },
+            });
+          }
         };
         return Reflect.get(target, key);
       },
@@ -171,7 +232,8 @@ export default async function deliveryTmux(pi: ExtensionAPI) {
       timeoutMs: TIMEOUT_MS,
       onLaunch(record) {
         if (!context || !reserved) throw new Error("Unreserved delivery launch refused");
-        const next: Owned = { ...record, version: 1, parent, state: "running", resources: RESOURCES };
+        const next: Owned = { ...record, version: 1, parent, state: "running", resources: RESOURCES,
+          workflow: launchWorkflow ?? { kind: "team" } };
         persist(next); knownRuns.add(record.id); active = record.name;
       },
       onTerminal(name, id, state) {

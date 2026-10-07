@@ -41,7 +41,7 @@ test("installer creates all links and is repeatable", async t => {
   );
   for (const name of [
     "debug", "grill-me", "zoom-out", "duadigital-pdf-maker",
-    "homelab-validation", "delivery",
+    "homelab-validation", "delivery", "discovery",
   ]) {
     assert.equal(
       await readlink(resolve(path, ".pi/agent/skills", name)),
@@ -97,6 +97,45 @@ test("tmux opt-in preserves file, directory, conflicting and dangling symlinks",
     else if (kind === "directory") assert.ok((await lstat(conflict)).isDirectory());
     else assert.equal(await readlink(conflict), resolve(path, kind));
     await assert.rejects(lstat(resolve(path, ".pi/agent/extensions/delivery-worker")), { code: "ENOENT" });
+  }
+});
+
+test("discovery skill is readable through fake-HOME installation without duplicate Team alias", async t => {
+  const path = await home(t);
+  assert.equal(install(path).status, 0);
+  const skill = await readFile(resolve(path, ".pi/agent/skills/discovery/SKILL.md"), "utf8");
+  assert.match(skill, /^---\nname: discovery\ndescription: .+\n---/);
+  assert.match(skill, /let the user choose/i);
+  assert.equal(await readlink(resolve(path, ".pi/agent/skills/delivery")), resolve(root, "skills/delivery"));
+  await assert.rejects(lstat(resolve(path, ".pi/agent/skills/team")), { code: "ENOENT" });
+});
+
+test("discovery installation preserves conflicts, settings and existing delivery alias", async t => {
+  for (const kind of ["file", "directory", "link", "dangling"]) {
+    const path = await home(t);
+    assert.equal(install(path).status, 0);
+    const agent = resolve(path, ".pi/agent");
+    const conflict = resolve(agent, "skills/discovery");
+    // Replace only the exact symlink created by this fixture.
+    await rm(conflict);
+    if (kind === "file") await writeFile(conflict, "preserve discovery");
+    else if (kind === "directory") {
+      await mkdir(conflict);
+      await writeFile(resolve(conflict, "owned.txt"), "preserve directory");
+    } else {
+      const destination = resolve(path, kind);
+      if (kind === "link") await mkdir(destination);
+      await symlink(destination, conflict);
+    }
+    const settings = '{"defaultModel":"keep","hideThinkingBlock":false}\n';
+    await writeFile(resolve(agent, "settings.json"), settings);
+    const result = install(path);
+    assert.equal(result.status, 1); assert.match(result.stderr, /Refusing to overwrite/);
+    if (kind === "file") assert.equal(await readFile(conflict, "utf8"), "preserve discovery");
+    else if (kind === "directory") assert.equal(await readFile(resolve(conflict, "owned.txt"), "utf8"), "preserve directory");
+    else assert.equal(await readlink(conflict), resolve(path, kind));
+    assert.equal(await readFile(resolve(agent, "settings.json"), "utf8"), settings);
+    assert.equal(await readlink(resolve(agent, "skills/delivery")), resolve(root, "skills/delivery"));
   }
 });
 
