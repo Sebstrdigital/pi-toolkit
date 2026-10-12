@@ -1,6 +1,11 @@
 # Pi Fresh Start
 
-*2026-10-06 · Current status*
+*2026-10-06 snapshot · historical setup/status record*
+
+> **Historical notice:** This record preserves the reset and day-one decisions.
+> For current navigation and proposal status, see [the documentation map](README.md)
+> and [maintenance index](maintenance/README.md). It grants no current
+> installation, configuration, or delivery authority.
 
 ## Direction
 
@@ -109,7 +114,7 @@ Its current provider has not been checked. Before actually cancelling
 Claude, revisit that dependency and verify the intended OpenAI login and
 subscription. Deferral is not evidence that cancellation is safe.
 
-## Session close
+## Historical session close
 
 The user authorized documentation reconciliation and a selective commit
 of the current toolkit. Raw worker transcripts, probe artifacts, local

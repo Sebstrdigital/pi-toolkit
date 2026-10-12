@@ -4,10 +4,11 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const agent = resolve(process.env.HOME, '.pi/agent');
 const options = new Set(process.argv.slice(2));
-for (const option of options) if (!['--with-delivery-tmux', '--with-progress', '--hide-thinking'].includes(option)) throw Error(`Unknown option: ${option}`);
-const links = [['agent/AGENTS.md', 'AGENTS.md'], ...['debug','grill-me','zoom-out','duadigital-pdf-maker','homelab-validation','delivery','discovery'].map(n=>[`skills/${n}`,`skills/${n}`]), ['extensions/delivery-worker','extensions/delivery-worker']];
+for (const option of options) if (!['--with-delivery-tmux', '--with-progress', '--hide-thinking', '--with-one-pager'].includes(option)) throw Error(`Unknown option: ${option}`);
+const links = [['agent/AGENTS.md', 'AGENTS.md'], ...['debug','grill-me','zoom-out','duadigital-pdf-maker','homelab-validation','delivery','discovery','addy-engineering'].map(n=>[`skills/${n}`,`skills/${n}`]), ['extensions/delivery-worker','extensions/delivery-worker']];
 if (options.has('--with-delivery-tmux')) links.push(['extensions/delivery-tmux','extensions/delivery-tmux']);
 if (options.has('--with-progress')) links.push(['extensions/lean-progress','extensions/lean-progress']);
+if (options.has('--with-one-pager')) links.push(['skills/one-pager','skills/one-pager'], ['extensions/one-pager','extensions/one-pager']);
 const present = p => existsSync(p) || (()=>{try { lstatSync(p); return true; } catch(e) { if(e.code==='ENOENT') return false; throw e; }})();
 // Preflight ALL destinations and parent directories before any user mutation.
 for (const parent of [resolve(process.env.HOME,'.pi'), agent, resolve(agent,'skills'), resolve(agent,'extensions')]) {

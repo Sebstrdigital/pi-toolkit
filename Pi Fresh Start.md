@@ -1,7 +1,8 @@
 # Pi Fresh Start
 
-The maintained plan and current status are in
-[docs/pi-fresh-start.md](docs/pi-fresh-start.md).
+The retained setup/status record is in
+[docs/pi-fresh-start.md](docs/pi-fresh-start.md). For current navigation and
+maintenance proposals, see [docs/README.md](docs/README.md).
 
 As of 2026-10-06, the clean reset and minimal setup are complete, sequential
 delivery and its progress widget are installed, and the user considers the

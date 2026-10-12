@@ -55,6 +55,11 @@ export function rollbackOwnedLaunch(surface: string | undefined, error: unknown,
 /** A retained failed close must prevent another delivery worker taking the slot. */
 export function hasOwnedSurfaces(): boolean { return owned.size > 0; }
 
+/** Active known workers may coexist; failed or orphaned surfaces still block dispatch. */
+export function hasUnreconciledSurfaces(activeRunIds: ReadonlySet<string>): boolean {
+  return [...owned.values()].some(record => !activeRunIds.has(record.runId) || !!record.failure || !!record.cleanupError);
+}
+
 export function cleanupOwnedSurfaces(): unknown[] {
   const errors: unknown[] = [];
   for (const surface of [...owned.keys()]) {

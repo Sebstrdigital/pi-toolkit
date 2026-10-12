@@ -1,0 +1,23 @@
+{
+  "title": "From agent work to a readable browser presentation",
+  "summary": "Use one-pager when you want to understand the agent’s output in a browser. Choose the presentation style, then read one coherent document with useful visuals and expandable detail.",
+  "modes": ["explainer", "guide"],
+  "sources": [{"id": "guide", "label": "One-pager usage and boundaries", "path": "../../../docs/one-pager.md"}],
+  "sections": [
+    {
+      "title": "One artifact, complementary modes",
+      "blocks": [
+        {"type": "text", "text": "A one-pager is a single HTML document, not necessarily a single printed page. The overview stays concise; deeper evidence and mechanics can expand when you need them.", "references": ["guide"]},
+        {"type": "table", "headers": ["Mode", "Best for"], "rows": [["Briefing", "Research findings and recommendations"], ["Guide", "Practical steps and examples"], ["Explainer", "Concepts and relationships"], ["Decision review", "Choices, trade-offs, and draft feedback"]], "references": ["guide"]},
+        {"type": "diagram", "title": "Presentation workflow", "description": "A presentation preference shapes the document. It does not approve the underlying proposal or authorize implementation.", "nodes": [{"id":"material","label":"Inspected conversation and sources"},{"id":"modes","label":"Your selected presentation modes"},{"id":"html","label":"One self-contained browser document"}], "edges": [{"from":"material","to":"modes","label":"Agent recommends; you choose"},{"from":"modes","to":"html","label":"Agent integrates the selected modes"}], "references": ["guide"]}
+      ]
+    },
+    {
+      "title": "Make your first one-pager",
+      "blocks": [
+        {"type": "steps", "items": [{"title":"Ask for a presentation","text":"Invoke /skill:one-pager with the topic, or ask the agent to make a one-pager from the material already discussed."},{"title":"Choose the style","text":"If unspecified, pick one of the four modes or Combine modes. A combination requires at least two selections. Explicitly naming modes skips the questions."},{"title":"Read in the browser","text":"The agent creates and opens the HTML. Use the contents navigation and expand supporting detail when needed."}], "references": ["guide"]},
+        {"type":"details","title":"What stays local, and what needs explicit submission?","blocks":[{"type":"text","text":"The page has no background network requests. External source links open only when followed. Decision-review positions are draft feedback: export and submit them through the project’s real acceptance process. The page never changes an ADR or authorizes implementation."}],"references":["guide"]}
+      ]
+    }
+  ]
+}

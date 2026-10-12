@@ -93,16 +93,24 @@ export function seedSubagentSessionFile(params: {
  * resume faithful even if the agent definition is later edited, moved, or
  * deleted.
  */
-export const DELIVERY_TOOLS = {
+const LEGACY_DELIVERY_TOOLS = {
   builder: "read,grep,find,ls,bash,edit,write,ask_question",
   validator: "read,grep,find,ls,bash,ask_question",
   reviewer: "read,grep,find,ls,ask_question",
+} as const;
+export const DELIVERY_TOOLS = {
+  builder: "read,grep,find,ls,bash,edit,write,codemode,ask_question",
+  validator: "read,grep,find,ls,bash,codemode,ask_question",
+  reviewer: "read,grep,find,ls,codemode,ask_question",
+  scout: "read,grep,find,ls,codemode,ask_question",
 } as const;
 export type DeliveryRole = keyof typeof DELIVERY_TOOLS;
 
 export interface SubagentLoadout {
   /** Explicit opt-in; null explicitly denotes legacy, not delivery restrictions. */
   deliveryRole: DeliveryRole | null;
+  /** Absent retains legacy resource denial on saved resumes. */
+  resourcePolicy?: "project-context";
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
   /** The `--tools` allowlist string, or null when the spawn was unrestricted. */
@@ -144,6 +152,7 @@ export function writeSubagentLoadout(sessionFile: string, loadout: SubagentLoado
 export function isSubagentLoadout(value: unknown): value is SubagentLoadout {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
+  if (Object.hasOwn(v, "resourcePolicy") && (v.resourcePolicy !== "project-context" || v.deliveryRole === null)) return false;
   const nullableStrings = ["agent", "toolAllowlist", "model", "thinking", "identity", "cwd", "agentDir"];
   for (const key of nullableStrings) {
     if (!Object.hasOwn(v, key) || (v[key] !== null &&
@@ -163,7 +172,9 @@ export function isSubagentLoadout(value: unknown): value is SubagentLoadout {
   if (!Object.hasOwn(v, "deliveryRole")) return false;
   if (v.deliveryRole !== null) {
     if (!Object.hasOwn(DELIVERY_TOOLS, v.deliveryRole as string) ||
-      v.toolAllowlist !== DELIVERY_TOOLS[v.deliveryRole as DeliveryRole] ||
+      (v.toolAllowlist !== DELIVERY_TOOLS[v.deliveryRole as DeliveryRole] &&
+        (!Object.hasOwn(LEGACY_DELIVERY_TOOLS, v.deliveryRole as string) ||
+          v.toolAllowlist !== LEGACY_DELIVERY_TOOLS[v.deliveryRole as keyof typeof LEGACY_DELIVERY_TOOLS])) ||
       v.spawnable !== null) return false;
   }
   if (v.toolAllowlist !== null) {

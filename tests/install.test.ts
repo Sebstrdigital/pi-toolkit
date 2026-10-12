@@ -41,7 +41,7 @@ test("installer creates all links and is repeatable", async t => {
   );
   for (const name of [
     "debug", "grill-me", "zoom-out", "duadigital-pdf-maker",
-    "homelab-validation", "delivery", "discovery",
+    "homelab-validation", "delivery", "discovery", "addy-engineering",
   ]) {
     assert.equal(
       await readlink(resolve(path, ".pi/agent/skills", name)),
@@ -100,13 +100,16 @@ test("tmux opt-in preserves file, directory, conflicting and dangling symlinks",
   }
 });
 
-test("discovery skill is readable through fake-HOME installation without duplicate Team alias", async t => {
+test("discovery and six-phase skills are readable through fake-HOME installation without duplicate Team alias", async t => {
   const path = await home(t);
   assert.equal(install(path).status, 0);
   const skill = await readFile(resolve(path, ".pi/agent/skills/discovery/SKILL.md"), "utf8");
   assert.match(skill, /^---\nname: discovery\ndescription: .+\n---/);
-  assert.match(skill, /let the user choose/i);
+  assert.match(skill, /without requiring a mode-selection ritual/i);
   assert.equal(await readlink(resolve(path, ".pi/agent/skills/delivery")), resolve(root, "skills/delivery"));
+  const addy = await readFile(resolve(path, ".pi/agent/skills/addy-engineering/SKILL.md"), "utf8");
+  assert.match(addy, /^---\nname: addy-engineering\ndescription: .*six-phase/s);
+  assert.doesNotMatch(addy, /disable-model-invocation/);
   await assert.rejects(lstat(resolve(path, ".pi/agent/skills/team")), { code: "ENOENT" });
 });
 
@@ -137,6 +140,19 @@ test("discovery installation preserves conflicts, settings and existing delivery
     assert.equal(await readFile(resolve(agent, "settings.json"), "utf8"), settings);
     assert.equal(await readlink(resolve(agent, "skills/delivery")), resolve(root, "skills/delivery"));
   }
+});
+
+test("installer refuses and preserves conflicting six-phase skill destination", async t => {
+  const path = await home(t);
+  const skills = resolve(path, ".pi/agent/skills");
+  await mkdir(skills, { recursive: true });
+  const conflict = resolve(skills, "addy-engineering");
+  await writeFile(conflict, "keep this skill");
+  const result = install(path);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Refusing to overwrite/);
+  assert.equal(await readFile(conflict, "utf8"), "keep this skill");
+  await assert.rejects(lstat(resolve(path, ".pi/agent/extensions/delivery-worker")), { code: "ENOENT" });
 });
 
 test("installer refuses and preserves conflicting delivery destination", async t => {

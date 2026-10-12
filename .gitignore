@@ -1,0 +1,18 @@
+# Finder metadata; never source or task evidence.
+.DS_Store
+
+# Positively identified regenerable Node compile caches. Retain existing bytes.
+/node-compile-cache/
+/docs/delivery/autonomous-delivery-activation/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/a-initial/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/a-parent-review/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b1-initial/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b1-incident-review/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b1-parent-review/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b1-repair/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b2-initial/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b2-parent-review/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b3-continuation-initial/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b3-continuation-parent/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/b3-parent-reconciliation/compile-cache/
+/docs/delivery/autonomous-delivery-implementation/evidence/preparation/compile-cache/

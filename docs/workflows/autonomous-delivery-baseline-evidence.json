@@ -1,0 +1,157 @@
+{
+  "observed_utc": "2026-10-08T08:52:49.604194+00:00",
+  "lead_full_session": {
+    "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T02-03-39-767Z_01a11940-7f77-76d7-b131-9880fae9a826.jsonl",
+    "models": [
+      "gpt-6.1-sol"
+    ],
+    "input": 565155,
+    "output": 160935,
+    "reasoning": 71745,
+    "cacheRead": 24905728,
+    "responses": 250,
+    "tool_calls": 205
+  },
+  "lead_since_team_approval": {
+    "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T02-03-39-767Z_01a11940-7f77-76d7-b131-9880fae9a826.jsonl",
+    "models": [
+      "gpt-6.1-sol"
+    ],
+    "input": 263236,
+    "output": 121924,
+    "reasoning": 65191,
+    "cacheRead": 18561280,
+    "responses": 138,
+    "tool_calls": 116
+  },
+  "team_workers": [
+    {
+      "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T04-34-54-742Z_8e5599d4-50e891e6-ba720ac9-064b.jsonl",
+      "models": [
+        "gpt-6.1-sol"
+      ],
+      "input": 54239,
+      "output": 4456,
+      "reasoning": 348,
+      "cacheRead": 642944,
+      "responses": 20,
+      "tool_calls": 18
+    },
+    {
+      "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T04-42-27-523Z_0d30db77-d614b3af-eecbb46b-f9b3.jsonl",
+      "models": [
+        "gpt-6.1-sol"
+      ],
+      "input": 128621,
+      "output": 11772,
+      "reasoning": 922,
+      "cacheRead": 1907840,
+      "responses": 32,
+      "tool_calls": 30
+    },
+    {
+      "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T04-54-38-792Z_39f8fe22-4cce34c2-d7ef9545-c7cc.jsonl",
+      "models": [
+        "gpt-6.1-sol"
+      ],
+      "input": 121489,
+      "output": 23476,
+      "reasoning": 4027,
+      "cacheRead": 3026304,
+      "responses": 41,
+      "tool_calls": 39
+    },
+    {
+      "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T05-42-35-414Z_974de617-a997aa30-a6e9cb30-5c95.jsonl",
+      "models": [
+        "gpt-6.1-sol"
+      ],
+      "input": 80743,
+      "output": 9775,
+      "reasoning": 467,
+      "cacheRead": 872960,
+      "responses": 22,
+      "tool_calls": 21
+    },
+    {
+      "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T05-53-27-674Z_c9b1e094-85da8b06-c1a9b31b-7c2b.jsonl",
+      "models": [
+        "gpt-6.1-sol"
+      ],
+      "input": 130591,
+      "output": 13519,
+      "reasoning": 1256,
+      "cacheRead": 3976576,
+      "responses": 50,
+      "tool_calls": 45
+    },
+    {
+      "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T06-14-14-703Z_d4e1e320-aac1a9dd-a9e42daf-17d5.jsonl",
+      "models": [
+        "gpt-6.1-sol"
+      ],
+      "input": 149635,
+      "output": 6807,
+      "reasoning": 366,
+      "cacheRead": 2119168,
+      "responses": 43,
+      "tool_calls": 41
+    },
+    {
+      "session": "/Users/sebastianstrandberg/.pi/agent/sessions/--Users-sebastianstrandberg-work-git-dikta--/2026-10-08T06-47-13-650Z_9f8abc2e-85c2f420-01c04437-f5dc.jsonl",
+      "models": [
+        "gpt-6.1-sol"
+      ],
+      "input": 182645,
+      "output": 32603,
+      "reasoning": 4642,
+      "cacheRead": 6805376,
+      "responses": 65,
+      "tool_calls": 62
+    }
+  ],
+  "team_worker_sum": {
+    "input": 847963,
+    "output": 102408,
+    "reasoning": 12028,
+    "cacheRead": 19351168,
+    "responses": 273,
+    "tool_calls": 256
+  },
+  "read_only_checkpoint_check": {
+    "task_sources_checked": 16,
+    "source_hash_mismatches": [],
+    "exported_helper_sha256": "67d7b3dc4333475704373fc0d27b9c5d06afd58b4afacf2f569b7f150bd82c23",
+    "original_approval_reference_matches": {
+      "brief.md": {
+        "inspected_path": "/Users/sebastianstrandberg/work/git/dikta/docs/delivery/native-kokoro-migration/team-f2-a2/approved-snapshots/brief.md",
+        "matches": true
+      },
+      "plan.md": {
+        "inspected_path": "/Users/sebastianstrandberg/work/git/dikta/docs/delivery/native-kokoro-migration/team-f2-a2/approved-snapshots/plan.md",
+        "matches": true
+      },
+      "agreement.md": {
+        "inspected_path": "/Users/sebastianstrandberg/work/git/dikta/docs/delivery/native-kokoro-migration/team-f2-a2/approved-snapshots/agreement.md",
+        "matches": true
+      },
+      "baseline.json": {
+        "inspected_path": "/Users/sebastianstrandberg/work/git/dikta/docs/delivery/native-kokoro-migration/team-f2-a2/baseline.json",
+        "matches": true
+      },
+      "candidate-base-manifest.json": {
+        "inspected_path": "/Users/sebastianstrandberg/work/git/dikta/docs/delivery/native-kokoro-migration/team-f2-a2/candidate-base-manifest.json",
+        "matches": true
+      }
+    }
+  },
+  "analysis_tool_errors": [
+    "First audit hash script assumed baseline.json existed under approved-snapshots; it is retained at job root. No file writes occurred before that read failure; corrected lookup explicitly records actual paths."
+  ],
+  "limits": [
+    "Summed retained assistant usage fields, not billed totals or unique context.",
+    "Reasoning field may be included in output; do not sum them as separate charges.",
+    "Wall timestamps are not active-effort accounting; no model latency benchmark.",
+    "No reexecution of tests, signatures or runtime checks; retained result evidence inspected."
+  ]
+}

@@ -25,6 +25,7 @@ import {
 } from "./tmux.ts";
 
 import { createOwnedSurface, closeOwnedSurface, rollbackOwnedLaunch, cleanupOwnedSurfaces } from "./surface-ownership.ts";
+import { ExecutionDeadline } from "./execution-deadline.ts";
 
 import {
   countSessionEntryLines,
@@ -315,7 +316,7 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
 }
 
 function discoverAgentDefinitions(): ListedAgentDefinition[] {
-  if (deliveryHooks) return ["builder", "validator", "reviewer"].map(name => {
+  if (deliveryHooks) return ["builder", "validator", "reviewer", "scout"].map(name => {
     const definition = loadAgentDefaults(name);
     if (!definition) throw new Error(`Missing bundled delivery profile: ${name}`);
     return { ...definition, name, disableModelInvocation: false, source: "package" as const };
@@ -869,10 +870,19 @@ function applySandboxToParts(
   if (loadout.model) parts.push("--model", shellEscape(loadout.model));
   if (loadout.thinking) parts.push("--thinking", shellEscape(loadout.thinking));
   if (loadout.deliveryRole) {
-    // No discovered capabilities, MCP connections, or extra tool-backing code.
-    // The caller explicitly loads only subagent-done.ts. This is not an OS sandbox.
-    parts.push("--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates",
-      "--no-themes", "--no-context-files", "--tools", shellEscape(loadout.toolAllowlist!));
+    // Deny discovery and MCP; explicitly load native codemode only when the
+    // pinned snapshot grants it. Legacy resumes retain their original tools.
+    // The caller also loads subagent-done.ts. This is not an OS sandbox.
+    // Textual project guidance is available on new launches. Executable extension
+    // and MCP discovery still needs an explicit trust/grant mechanism; not an OS sandbox.
+    parts.push("--no-extensions", "--no-mcp");
+    if (loadout.resourcePolicy !== "project-context") {
+      parts.push("--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files");
+    }
+    parts.push("--tools", shellEscape(loadout.toolAllowlist!));
+    if (loadout.toolAllowlist!.split(",").includes("codemode")) {
+      parts.push("-e", "builtin:codemode");
+    }
   }
 
   if (loadout.identity) {
@@ -1092,6 +1102,7 @@ function handleSubagentSteer(
     };
   }
 
+  syncDeliveryExecution(running);
   running.statusState = forceStatusAfterInterrupt(running.statusState, now);
   updateWidget();
 
@@ -1231,7 +1242,7 @@ async function launchSubagent(
   const deliveryRole = agentDefs?.deliveryRole;
   if (deliveryRole && (!Object.hasOwn(DELIVERY_TOOLS, deliveryRole) ||
       agentDefs?.cli === "claude" || agentDefs?.skills || agentDefs?.subagentAgents?.length)) {
-    throw new Error("Invalid delivery profile: only builder/validator/reviewer with no skills, nested spawning, or alternate CLI are allowed");
+    throw new Error("Invalid fixed profile: only builder/validator/reviewer/scout with no skills, nested spawning, or alternate CLI are allowed");
   }
   if (deliveryRole && agentDefs?.tools && buildSubagentToolAllowlist(agentDefs.tools) !== DELIVERY_TOOLS[deliveryRole as DeliveryRole]) {
     throw new Error("Delivery profile tools must match its pinned role grants; refusing silent capability changes");
@@ -1409,6 +1420,7 @@ async function launchSubagent(
   // restriction instead of relaunching pi with all global extensions + tools.
   const loadout: SubagentLoadout = {
     deliveryRole: (deliveryRole as DeliveryRole) ?? null,
+    ...(deliveryRole ? { resourcePolicy: "project-context" as const } : {}),
     agent: params.agent ?? null,
     toolAllowlist,
     model: effectiveModel ?? null,
@@ -1616,6 +1628,19 @@ function deliverPendingQuestion(running: RunningSubagent): void {
   try { unlinkSync(askFile); } catch {}
 }
 
+const deliveryDeadlines = new Map<string, { deadline: ExecutionDeadline; hooks: DeliveryHooks }>();
+function syncDeliveryExecution(running: RunningSubagent): void {
+  const lease = deliveryDeadlines.get(running.id);
+  if (!lease) return;
+  const intent = running.interruptionIntent ?? interruption(running.sessionFile, running.id);
+  const question = readJson(`${running.sessionFile}.pending-question`);
+  const state = intent?.state === "paused" ? "paused" :
+    isQuestion(question) && question.runId === running.id ? "waiting" : "running";
+  if (lease.deadline.transition(state)) {
+    lease.hooks.onExecutionTime?.(running.name, running.id, Math.ceil(lease.deadline.elapsedMs));
+  }
+}
+
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
@@ -1623,17 +1648,23 @@ async function watchSubagent(
   const hooks = deliveryHooks;
   if (!hooks) return watchSubagentResult(running, signal);
   const moduleSignal = getModuleAbortSignal();
-  const timeout = setTimeout(() => {
-    try { cancelDeliveryRun(running.name, running.id, "worker timeout (20-minute trial bound)"); }
+  const deadline = new ExecutionDeadline(hooks.timeoutMs, () => {
+    try { cancelDeliveryRun(running.name, running.id, "worker execution allowance exhausted"); }
     catch { /* Failed closure remains owned and blocks subsequent launches. */ }
-  }, hooks.timeoutMs);
+  });
+  deliveryDeadlines.set(running.id, { deadline, hooks });
   let paused = false;
-  const teardown = () => { clearTimeout(timeout); pausedDeliveryRuns.delete(running.id); moduleSignal.removeEventListener("abort", teardown); };
+  const teardown = () => {
+    deadline.close(); deliveryDeadlines.delete(running.id); pausedDeliveryRuns.delete(running.id);
+    moduleSignal.removeEventListener("abort", teardown);
+  };
   moduleSignal.addEventListener("abort", teardown, { once: true });
   try {
     const result = await watchSubagentResult(running, signal);
     paused = result.error === "paused" && !moduleSignal.aborted;
-    if (paused) pausedDeliveryRuns.set(running.id, { running, hooks, teardown });
+    if (paused) { deadline.transition("paused"); pausedDeliveryRuns.set(running.id, { running, hooks, teardown }); }
+    else deadline.close();
+    hooks.onExecutionTime?.(running.name, running.id, Math.ceil(deadline.elapsedMs));
     hooks.onTerminal(running.name, running.id, result.error === "paused" ? "paused" : result.error === "cancelled" ? "cancelled" : result.exitCode === 0 ? "completed" : "error");
     return result;
   } finally {
@@ -1656,6 +1687,7 @@ async function watchSubagentResult(
       onTick() {
         observeRunningSubagent(running);
         deliverPendingQuestion(running);
+        syncDeliveryExecution(running);
         const intent = running.interruptionIntent ?? interruption(running.sessionFile, running.id);
         if (intent?.state === "paused" && !running.interruptionNotified && latestPi) {
           try {
@@ -1782,6 +1814,8 @@ export interface DeliveryHooks {
   timeoutMs: number;
   onLaunch(record: { name: string; id: string; sessionFile: string; loadout: SubagentLoadout }): void;
   onTerminal(name: string, id: string, status: "paused" | "cancelled" | "completed" | "error"): void;
+  /** Cumulative execution elapsed in this run; waiting/paused time excluded. */
+  onExecutionTime?(name: string, id: string, elapsedMs: number): void;
   resolveSession(name: string): { sessionFile: string; sessionId: string | null } | undefined;
 }
 let deliveryHooks: DeliveryHooks | undefined;
@@ -1801,8 +1835,8 @@ export function cancelDeliveryRun(name: string, id: string, reason: string): voi
   const preserved = pausedDeliveryRuns.get(id);
   const running = runningSubagents.get(id);
   if (!running && preserved?.running.name === name) {
-    // A paused child may have exited; its pane and original deadline still belong
-    // to us. Stop/timeout must close it, not silently leave a held slot forever.
+    // A paused child may have exited; its pane still belongs to us. Explicit
+    // stop/shutdown closes it; waiting/paused time does not consume execution.
     closeOwnedSurface(preserved.running.surface, id);
     preserved.teardown();
     preserved.hooks.onTerminal(name, id, "cancelled");

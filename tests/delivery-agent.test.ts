@@ -96,10 +96,11 @@ test("completion, packet delivery, evidence, and reviewer restrictions", async t
   const args: string[] = JSON.parse(
     await readFile(resolve(f.base, "args.json"), "utf8"),
   );
-  assert.equal(args[args.indexOf("--tools") + 1], "read,grep,find,ls");
+  assert.equal(args[args.indexOf("--tools") + 1], "read,grep,find,ls,codemode");
+  assert.equal(args[args.indexOf("-e") + 1], "builtin:codemode");
   for (const flag of [
     "--no-session", "--no-approve", "--no-extensions", "--no-mcp",
-    "--no-skills", "--no-prompt-templates", "--no-themes", "--offline",
+    "--offline",
   ]) assert.ok(args.includes(flag));
   assert.ok(!args.includes("--no-context-files"));
   assert.ok(!args.includes("--model"));
@@ -194,7 +195,7 @@ test("builder receives the explicit write and shell tool list", () => {
   const args = command("builder", "role");
   assert.equal(
     args[args.indexOf("--tools") + 1],
-    "read,grep,find,ls,bash,edit,write",
+    "read,grep,find,ls,bash,edit,write,codemode",
   );
 });
 
