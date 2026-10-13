@@ -573,6 +573,13 @@ function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
   return ` stalled${detail}${duration} `;
 }
 
+function followUpHint(name: string): string {
+  return `Follow up for ${JSON.stringify(name)} with subagent_message using the original scoped invocation: ` +
+    "Developer new work retains approvalRef and packetRef; Scout retains discoveryAuthorityRef; " +
+    "declared Team retains approvalRef and packetRef. Preserve existing limits and saved pins; " +
+    "these references do not grant new authority.";
+}
+
 function resolveResultPresentation(
   result: Pick<
     SubagentResult,
@@ -580,9 +587,9 @@ function resolveResultPresentation(
   >,
   name: string,
 ): string {
-  // Name is the persistent handle: the same name steers a running subagent or
-  // resumes a finished one, so follow-ups always reference it.
-  const sessionRef = `\n\nFollow up with subagent_message({ name: "${name}", message: "…" })`;
+  // Provenance is owned by the guarded service, not this presentation layer.
+  // Refer to the original invocation rather than inventing a bare resume call.
+  const sessionRef = `\n\n${followUpHint(name)}`;
 
   if (result.error === "paused" || result.error === "cancelled") {
     return `Sub-agent "${name}" ${result.error}. No completion is claimed.${sessionRef}`;
@@ -2668,7 +2675,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         // Clean summary (remove follow-up ref and leading label for display)
         const summary = rawContent
-          .replace(/\n\nFollow up with subagent_message[\s\S]+$/, "")
+          .replace(`\n\n${followUpHint(name)}`, "")
           .replace(`Sub-agent "${name}" completed (${elapsed}).\n\n`, "")
           .replace(`Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`, "")
           .replace(
@@ -2686,7 +2693,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           // Full view: complete summary + session info
           if (summary) {
             for (const line of summary.split("\n")) {
-              contentLines.push(line.slice(0, width - 6));
+              // Text wraps to the Box width; never clip full-evidence pointers.
+              contentLines.push(line);
             }
           }
           if (details.name || details.sessionFile) {
@@ -2695,7 +2703,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               contentLines.push(
                 theme.fg(
                   "dim",
-                  `Follow up:  subagent_message({ name: "${details.name}", message: "…" })`,
+                  followUpHint(details.name),
                 ),
               );
             }

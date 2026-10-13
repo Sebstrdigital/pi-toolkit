@@ -4,6 +4,7 @@ import { resolveRoleRoute } from "./role-routing.ts";
 import { chargeExecution, isExecutionRecord, remainingExecutionMs } from "./allowance.ts";
 import { realpathSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { boundNotification } from "./notifications.ts";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { SubagentLoadout } from "../../vendor/pi-interactive-subagents/pi-extension/subagents/session.ts";
@@ -271,11 +272,8 @@ async function createService(pi: ExtensionAPI): Promise<ExecutionService> {
           return target.on(name as any, handler);
         };
         if (key === "sendMessage") return (message: any, options: any) => {
-          const bounded = {
-            ...message,
-            content: typeof message.content === "string" ? message.content.slice(0, 16000) : message.content,
-            details: message.details ? { ...message.details, task: undefined } : undefined,
-          };
+          const bounded = boundNotification(message, context?.sessionManager.getSessionFile(),
+            (type, data) => target.appendEntry(type, data));
           const result = target.sendMessage(bounded, options);
           emit({ type: "message", message: bounded });
           return result;

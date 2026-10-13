@@ -18,7 +18,7 @@ async function hostPath() {
   }
 }
 
-for (const scenario of ["api-only", "api-ready-failure", "api-direct-admission", "api-registration", "api-roles", "api-parallel-worktrees", "api-failure-rollback", "api-saved-resume", "api-reservation-pause-reply", "api-shutdown", "api-developer-admission", "api-developer-provenance", "api-scout-admission", "api-scout-provenance", "legacy-policy-resume", "parallel-worktrees", "compact-developer", "registration", "collision", "non-tmux", "reservation-pause-reply", "child-input-reply-rearm", "failure-rollback", "saved-resume", "timeout", "shutdown", "persistence-failure", "roles", "old-owned", "unresolved-owned", "cleanup-retry", "pause-exit-timeout", "developer-admission", "developer-registration", "developer-collision", "developer-non-tmux", "developer-reservation-pause-reply", "developer-child-input-reply-rearm", "developer-failure-rollback", "developer-saved-resume", "developer-timeout", "developer-shutdown", "developer-persistence-failure", "developer-unresolved-owned", "developer-cleanup-retry", "developer-pause-exit-timeout", "developer-provenance", "developer-stop", "developer-correlation-live", "developer-correlation-terminal", "legacy-team", "scout-admission", "scout-registration", "scout-collision", "scout-reservation-pause-reply", "scout-child-input-reply-rearm", "scout-failure-rollback", "scout-saved-resume", "scout-timeout", "scout-shutdown", "scout-persistence-failure", "scout-unresolved-owned", "scout-cleanup-retry", "scout-pause-exit-timeout", "scout-provenance", "scout-stop", "scout-non-tmux", "scout-correlation-live", "scout-correlation-terminal", "routing-team-explicit", "developer-routing-strong", "scout-routing-lookup", "scout-routing-strong", "routing-admission"] as const) {
+for (const scenario of ["notification-evidence", "notification-error-evidence", "api-only", "api-ready-failure", "api-direct-admission", "api-registration", "api-roles", "api-parallel-worktrees", "api-failure-rollback", "api-saved-resume", "api-reservation-pause-reply", "api-shutdown", "api-developer-admission", "api-developer-provenance", "api-scout-admission", "api-scout-provenance", "legacy-policy-resume", "parallel-worktrees", "compact-developer", "registration", "collision", "non-tmux", "reservation-pause-reply", "child-input-reply-rearm", "failure-rollback", "saved-resume", "timeout", "shutdown", "persistence-failure", "roles", "old-owned", "unresolved-owned", "cleanup-retry", "pause-exit-timeout", "developer-admission", "developer-registration", "developer-collision", "developer-non-tmux", "developer-reservation-pause-reply", "developer-child-input-reply-rearm", "developer-failure-rollback", "developer-saved-resume", "developer-timeout", "developer-shutdown", "developer-persistence-failure", "developer-unresolved-owned", "developer-cleanup-retry", "developer-pause-exit-timeout", "developer-provenance", "developer-stop", "developer-correlation-live", "developer-correlation-terminal", "legacy-team", "scout-admission", "scout-registration", "scout-collision", "scout-reservation-pause-reply", "scout-child-input-reply-rearm", "scout-failure-rollback", "scout-saved-resume", "scout-timeout", "scout-shutdown", "scout-persistence-failure", "scout-unresolved-owned", "scout-cleanup-retry", "scout-pause-exit-timeout", "scout-provenance", "scout-stop", "scout-non-tmux", "scout-correlation-live", "scout-correlation-terminal", "routing-team-explicit", "developer-routing-strong", "scout-routing-lookup", "scout-routing-strong", "routing-admission"] as const) {
   test(`delivery installed loader: ${scenario}`, async t => {
     const dir = await mkdtemp(join(tmpdir(), "delivery-tmux-integration-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
@@ -56,7 +56,7 @@ printf '%s\\n' "$*" >> "$FAKE_LOG"
 case "$1" in
  split-window) n=0; if [ -f "$FAKE_LOG.count" ]; then read n < "$FAKE_LOG.count"; fi; n=$((n+1)); printf '%s\\n' "$n" > "$FAKE_LOG.count"; printf '%%owned%s\\n' "$n" ;;
  send-keys) if [ -f "$FAIL_TRANSPORT" ]; then exit 23; fi ;;
- capture-pane) if [ -f "$DONE_FILE" ]; then printf '__SUBAGENT_DONE_0__\\n'; fi ;;
+ capture-pane) if [ -f "$DONE_FILE" ]; then printf '__SUBAGENT_DONE_${scenario === "notification-error-evidence" ? 7 : 0}__\\n'; fi ;;
  kill-pane) if [ -f "$FAIL_CLEANUP" ]; then exit 29; fi; exit 0 ;;
  *) exit 24 ;;
 esac
@@ -101,7 +101,7 @@ esac
       const runtime=loaded.runtime;
       runtime.getAllTools=()=> scenario==='collision' ? [{name:scout?'scout':developer?'developer':'subagent_message'}] : [...extension.tools.keys()].map(name=>({name}));
       runtime.getThinkingLevel=()=> 'medium';
-      runtime.appendEntry=(customType,data)=>{ if(scenario==='persistence-failure') throw new Error('storage failed'); entries.push({type:'custom',customType,data:structuredClone(data)}); };
+      runtime.appendEntry=(customType,data)=>{ if(scenario==='persistence-failure') throw new Error('storage failed'); const entry={type:'custom',customType,data:structuredClone(data)}; entries.push(entry); if(scenario==='notification-evidence'||scenario==='notification-error-evidence') writeFileSync(dir+'/parent.jsonl',JSON.stringify(entry)+'\\n',{flag:'a'}); };
       runtime.sendMessage=(message)=>messages.push(message);
       const parent=dir+'/parent.jsonl'; writeFileSync(parent,JSON.stringify({type:'session',version:3,id:'parent',cwd:dir})+'\\n');
       if(scenario==='old-owned') entries.push({type:'custom',customType:'delivery-tmux-owned-v1',data:{name:'legacy',version:0}});
@@ -376,7 +376,40 @@ esac
           if(scout)assert.doesNotMatch(script,/--tools '[^']*(bash|edit|write|subagent|web)/);
           assert.doesNotMatch(script,/UNAPPROVED|claude|PI_SUBAGENT_ALLOWED/);
           const header=JSON.stringify({type:'session',version:3,id:'child',cwd:dir})+'\\n';writeFileSync(record.sessionFile,header);
-          if(scenario==='correlation-live'||scenario==='correlation-terminal') {
+          if(scenario==='notification-evidence'||scenario==='notification-error-evidence') {
+            const failed=scenario==='notification-error-evidence';
+            const tail=failed?'TAIL ERROR/COVERAGE CAVEAT':'TAIL FAILURE/COVERAGE CAVEAT';
+            const long='x'.repeat(17000)+tail;
+            const publication=JSON.stringify({type:'question',runId:record.id,questionId:'long-q',question:long,name:'owned',agent:'builder'});
+            writeFileSync(record.sessionFile+'.pending-question',publication);
+            writeFileSync(record.sessionFile+'.ask',publication);
+            await sleep(1200);
+            const question=messages.find(m=>m.customType==='subagent_question'); assert.ok(question);
+            const verify=message=>{
+              assert.ok(message.content.length<=16000);assert.match(message.content,/TRUNCATED/);
+              const pointer=message.details.notificationEvidence;
+              assert.equal(pointer.sessionFile,parent);
+              const entry=readFileSync(pointer.sessionFile,'utf8').trim().split('\\n').map(JSON.parse).find(e=>e.customType===pointer.customType&&e.data.evidenceId===pointer.evidenceId);
+              assert.ok(entry.data.message.content.includes(long),'Full omitted question/result/error is retrievable exactly from pointer');
+              assert.ok(message.content.includes(pointer.evidenceId));
+            };
+            verify(question);
+            await rawCall('subagent_message',{name:'owned',runId:record.id,questionId:'long-q',message:'Fixture answer'});
+            writeFileSync(record.sessionFile,header+JSON.stringify({type:'message',message:{role:'assistant',content:[{type:'text',text:long}]}})+'\\n');
+            writeFileSync(process.env.DONE_FILE,'done');await sleep(1200);
+            const completed=messages.find(m=>m.customType==='subagent_result');assert.ok(completed);verify(completed);
+            assert.equal(completed.details.status,failed?'error':'completed');
+            assert.equal(completed.details.exitCode,failed?7:0);
+            assert.ok(!completed.content.includes('subagent_message({'));
+            const theme={fg:(_c,t)=>t,bg:(_c,t)=>t,bold:t=>t};
+            const lines=extension.messageRenderers.get('subagent_result')(completed,{expanded:true},theme).render(80);
+            const rendered=lines.join('\\n');
+            assert.match(rendered,/TRUNCATED/,'Renderer must not strip the evidence notice with the follow-up hint');
+            const visible=rendered.replace(/\\s/g,'');
+            for(const value of Object.values(completed.details.notificationEvidence)) assert.ok(visible.includes(value.replace(/\\s/g,'')),'Complete path/type/UUID must be visible at 80 columns');
+            assert.ok(lines.every(line=>line.length<=80),'Wrapped renderer fits the terminal');
+            assert.ok(!rendered.includes('subagent_message({'));
+          } else if(scenario==='correlation-live'||scenario==='correlation-terminal') {
             const terminal=scenario==='correlation-terminal';
             if(terminal) {
               writeFileSync(process.env.DONE_FILE,'done');await sleep(1200);unlinkSync(process.env.DONE_FILE);

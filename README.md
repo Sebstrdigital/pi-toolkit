@@ -55,7 +55,9 @@ Default installation creates the core instruction, skill, and
 `delivery-worker` symlinks under `~/.pi/agent/`. It is conflict-safe:
 pre-existing files or links to different targets are not overwritten. Keep
 this checkout in place. Loading a newly installed extension requires a fresh
-Pi session or `/reload`; this repository does not perform either.
+Pi session or `/reload`; this repository does not perform either. Changes to
+already-linked extension source also need a fresh session or explicit reload;
+updating this checkout does not replace code loaded in an existing session.
 
 Optional components require their own approval and explicit installer flag:
 
@@ -99,6 +101,12 @@ project context while executable extension/MCP discovery remains trust-gated;
 saved sessions keep their recorded policy and pins. Exact behavior and source
 limits are in [lean workflows](docs/lean-workflows.md) and
 [Scout routing](docs/workflows/scout-role-routing.md).
+
+Completion/resume hints refer to the original scoped invocation, preserving
+Developer, Scout and declared-Team authority references. Notifications above
+16,000 characters explicitly report truncation and point to the full original
+notification in the parent-session JSONL; expanded results wrap the complete
+evidence pointer. These are interface fixes, not new workflow gates.
 
 Repository tests use isolated fakes. They do not certify personal installation,
 reload, live providers, or release acceptance. Run the relevant checks for a
