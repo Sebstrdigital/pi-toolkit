@@ -40,13 +40,16 @@ for (const mode of ["fresh", "resume"] as const) {
       await writeFile(join(bin, "tmux"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_TMUX_LOG"
 case "$1" in
-  split-window)
+  display-message) printf '$fake-session\\n'; exit 0 ;;
+  new-session) printf '$parking %%parking-anchor\\n'; exit 0 ;;
+  new-window)
     if [ "$FAILURE" = setup ]; then printf blocked > "$OBSTRUCTION"; fi
     printf '%%fake-owned\\n'; exit 0 ;;
   send-keys)
     if [ "$FAILURE" = partial-transport ] && [ "$4" = -l ]; then exit 0; fi
     exit 23 ;;
   kill-pane)
+    if [ "$3" = %parking-anchor ]; then exit 0; fi
     n=0
     if [ -f "$FAKE_TMUX_LOG.count" ]; then read n < "$FAKE_TMUX_LOG.count"; fi
     n=$((n+1)); printf '%s\\n' "$n" > "$FAKE_TMUX_LOG.count"
@@ -114,8 +117,8 @@ esac
       assert.match(output.failure, failure === "setup" ? /EEXIST/ : failure === "teardown-race" ? /cancelled during parent teardown/ : /send-keys/);
       assert.doesNotMatch(output.failure, /kill-pane/, "Cleanup must not replace original launch error");
       const calls = await readFile(log, "utf8");
-      assert.match(calls, /split-window/);
-      assert.doesNotMatch(calls, /select-layout/);
+      assert.match(calls, /new-window -d/);
+      assert.doesNotMatch(calls, /split-window|select-layout/);
       assert.doesNotMatch(calls, /kill-pane -t %fake-parent/);
       assert.equal((calls.match(/kill-pane -t %fake-owned/g) ?? []).length, failure.endsWith("retry") ? 3 : 1);
       if (failure === "setup" || failure === "teardown-race") assert.doesNotMatch(calls, /send-keys/);
@@ -155,8 +158,10 @@ for (const transportFails of [true, false]) {
     await writeFile(join(bin, "tmux"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_TMUX_LOG"
 case "$1" in
+  display-message) printf '$fake-session\\n'; exit 0 ;;
+  new-session) printf '$parking %%parking-anchor\\n'; exit 0 ;;
   send-keys) exit ${transportFails ? 23 : 0} ;;
-  split-window) printf '%%caller\\n'; exit 0 ;;
+  new-window) printf '%%caller\\n'; exit 0 ;;
   kill-pane) exit 0 ;;
   *) exit 24 ;;
 esac
@@ -207,9 +212,12 @@ esac
     assert.equal(result.status, 0, result.stderr);
     const calls = await readFile(log, "utf8");
     assert.match(calls, /send-keys -t %caller/);
-    assert.doesNotMatch(calls, /select-layout/);
-    if (previouslyOwned) assert.equal((calls.match(/kill-pane/g) ?? []).length, 1, 'Only the original owner closes on shutdown');
-    else assert.doesNotMatch(calls, /kill-pane|split-window/);
+    assert.doesNotMatch(calls, /split-window|select-layout/);
+    if (previouslyOwned) {
+      assert.equal((calls.match(/kill-pane -t %caller/g) ?? []).length, 1, 'Only the original owner closes the worker on shutdown');
+      assert.equal((calls.match(/kill-pane -t %parking-anchor/g) ?? []).length, 1, 'Owner also closes its idle keeper');
+    }
+    else assert.doesNotMatch(calls, /kill-pane|new-window|split-window/);
   });
   }
 }

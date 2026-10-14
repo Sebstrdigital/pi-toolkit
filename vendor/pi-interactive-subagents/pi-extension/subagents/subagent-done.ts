@@ -18,6 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
 import { randomUUID } from "node:crypto";
+import { requestPaneHide } from "./pane-control.ts";
 import { atomicJson, interruption, isQuestion, readJson, REPLY_PREFIX, WORK_PREFIX, parseEnvelope, type Question } from "./control.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
@@ -142,7 +143,7 @@ export default function (pi: ExtensionAPI) {
         if (expanded) {
           // Expanded: full tool list + denied
           const countInfo = theme.fg("dim", ` — ${toolNames.length} available`);
-          const hint = theme.fg("muted", "  (Ctrl+Alt+O to collapse)");
+          const hint = theme.fg("muted", "  (Ctrl+Alt+O to collapse) · /subagents hide");
 
           const toolList = toolNames
             .map((name: string) => theme.fg("dim", name))
@@ -169,7 +170,7 @@ export default function (pi: ExtensionAPI) {
             denied.length > 0
               ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`)
               : "";
-          const hint = theme.fg("muted", "  (Ctrl+Alt+O to expand)");
+          const hint = theme.fg("muted", "  (Ctrl+Alt+O to expand) · /subagents hide");
 
           const content = new Text(`${agentTag}${countInfo}${deniedInfo}${hint}`, 0, 0);
           box.addChild(content);
@@ -244,6 +245,23 @@ export default function (pi: ExtensionAPI) {
       }, 25);
       controlTimer.unref();
     }
+  });
+
+  pi.registerCommand("subagents", {
+    description: "Hide this worker pane: /subagents hide (worker continues running)",
+    handler: async (args, ctx) => {
+      if (ctx.mode !== "tui" || !ctx.hasUI) return;
+      if (args.trim() !== "hide") {
+        ctx.ui.notify("Use /subagents hide to hide this worker. Select agents from the orchestrator's /subagents list.", "info");
+        return;
+      }
+      if (!sessionFile || !process.env.PI_SUBAGENT_ID) {
+        ctx.ui.notify("Cannot hide: this session has no owning orchestrator/run identity.", "error");
+        return;
+      }
+      try { await requestPaneHide(sessionFile, runId); }
+      catch (error) { ctx.ui.notify(`Cannot hide subagent detail: ${String(error)}`, "error"); }
+    },
   });
 
   pi.registerCommand("subagent-control", {

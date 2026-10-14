@@ -1,0 +1,152 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { spawnSync, execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+const host = resolve(execFileSync('npm', ['root', '-g'], {encoding:'utf8'}).trim(), '@earendil-works/pi-coding-agent');
+const source = resolve(root, 'vendor/pi-interactive-subagents/pi-extension/subagents');
+
+test('inline list, owned pane visibility, attention, and lifecycle through actual loader', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-hidden-panes-'));
+  const bin = join(dir, 'bin'); mkdirSync(bin);
+  const log = join(dir, 'tmux.log');
+  writeFileSync(join(bin, 'tmux'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_LOG"
+case "$1" in
+ display-message) case "$*" in *pane_width*) printf '80 50 160 50\\n' ;; *window_width*) printf '160 50\\n' ;; *) printf '$test-session\\n' ;; esac ;;
+ new-session) printf '$parking %%parking-anchor\\n' ;;
+ new-window) n=0; [ ! -f "$FAKE_LOG.count" ] || read n < "$FAKE_LOG.count"; n=$((n+1)); printf '%s\\n' "$n" > "$FAKE_LOG.count"; printf '%%worker%s\\n' "$n" ;;
+ join-pane) [ ! -f "$FAIL_JOIN" ] ;;
+ break-pane) [ ! -f "$FAIL_HIDE" ] ;;
+ select-pane|resize-pane|kill-pane) exit 0 ;;
+ *) exit 29 ;;
+esac
+`, {mode:0o755});
+  const wrapper = join(dir, 'extension.ts');
+  writeFileSync(wrapper, `import extension, {__test__} from ${JSON.stringify(join(source,'index.ts'))};
+import * as ownership from ${JSON.stringify(join(source,'surface-ownership.ts'))};
+import {createStatusState} from ${JSON.stringify(join(source,'status.ts'))};
+(globalThis as any).hiddenTest = { ...__test__, ownership, createStatusState };
+export default extension;\n`);
+  const program = `
+    import assert from 'node:assert/strict';
+    import {writeFileSync, unlinkSync, readFileSync} from 'node:fs';
+    const {loadExtensions}=await import(${JSON.stringify(join(host,'dist/core/extensions/loader.js'))});
+    const {createEventBus}=await import(${JSON.stringify(join(host,'dist/core/event-bus.js'))});
+    const {visibleWidth}=await import(${JSON.stringify(join(host,'node_modules/@earendil-works/pi-tui/dist/index.js'))});
+    const loaded=await loadExtensions([${JSON.stringify(wrapper)}],${JSON.stringify(dir)},createEventBus());
+    assert.deepEqual(loaded.errors,[]);
+    const ext=loaded.extensions[0], h=globalThis.hiddenTest;
+    let input, subscribed=0, unsubscribed=0, widget;
+    const notes=[];
+    const ctx={cwd:${JSON.stringify(dir)},mode:'tui',hasUI:true,sessionManager:{getSessionFile:()=>null},ui:{
+      onTerminalInput(fn){ input=fn; subscribed++; return ()=>{unsubscribed++;input=undefined;}; },
+      setWidget(_key,factory){widget=factory;},notify(message){notes.push(message);}
+    }};
+    const emit=async(name,context=ctx)=>{for(const fn of ext.handlers.get(name)??[])await fn({},context);};
+    await emit('session_start'); assert.equal(subscribed,1);
+    const commands=ext.commands;
+    assert.ok(commands.has('subagents'));
+    assert.equal(ext.shortcuts.has('ctrl+g'),false,'Ctrl+G must remain Pi prompt-editor binding');
+    const shortcut={handler:()=>commands.get('subagents').handler('',ctx)};
+    const make=(id,name,startTime)=>{
+      const surface=h.ownership.createOwnedSurface(name,{runId:id,sessionFile:${JSON.stringify(join(dir,'child'))}+id,delivery:true});
+      const running={id,name,startTime,surface,agent:'builder',sessionFile:${JSON.stringify(join(dir,'child'))}+id,statusState:h.createStatusState({source:'pi',startTimeMs:startTime})};
+      h.runningSubagents.set(id,running);return running;
+    };
+    const a=make('a','alpha',1), b=make('b','beta',2);
+    assert.equal(input('x'),undefined,'prompt input remains untouched before list focus');
+    await shortcut.handler(ctx);
+    assert.deepEqual(input('x'),{consume:true});
+    input('\\x1b[B');
+    h.runningSubagents.set('c',{...a,id:'c',name:'early',startTime:0,surface:a.surface});
+    let overlay=false;
+    const tui={hasOverlay:()=>overlay};
+    const render=()=>widget(tui,{}).render(120).join('\\n');
+    assert.match(render(),/>.*beta/,'selection stays on run ID after row insertion');
+    input('\\r');
+    assert.match(readFileSync(process.env.FAKE_LOG,'utf8'),/join-pane .*%worker2.*%parent/);
+    assert.equal(input('x'),undefined);
+    await shortcut.handler(ctx); input('\\x1b'); assert.equal(input('x'),undefined);
+    await commands.get('subagents').handler('hide',ctx);
+    const firstHide=readFileSync(process.env.FAKE_LOG,'utf8'); assert.match(firstHide,/break-pane .*%worker2/);
+    await commands.get('subagents').handler('hide',ctx);
+    assert.equal(readFileSync(process.env.FAKE_LOG,'utf8'),firstHide,'hide is idempotent');
+    assert.throws(()=>h.ownership.revealOwnedSurface('%unowned','z'),/owned/);
+    assert.throws(()=>h.ownership.revealOwnedSurface(a.surface,'wrong'),/owned/);
+    h.ownership.revealOwnedSurface(a.surface,'a');
+    writeFileSync(process.env.FAIL_HIDE,'fail');
+    assert.throws(()=>h.ownership.revealOwnedSurface(b.surface,'b'));
+    unlinkSync(process.env.FAIL_HIDE);
+    h.ownership.revealOwnedSurface(b.surface,'b');
+    const calls=readFileSync(process.env.FAKE_LOG,'utf8');
+    assert.ok(calls.lastIndexOf('break-pane -d -s %worker1') < calls.lastIndexOf('join-pane -h -s %worker2'));
+    h.ownership.hideOwnedSurface();
+    // A real child extension routes hide to parent ownership rather than moving
+    // arbitrary panes or letting the model interpret the slash command as a task.
+    process.env.PI_SUBAGENT_SESSION=b.sessionFile;
+    process.env.PI_SUBAGENT_ID='b';
+    const childLoaded=await loadExtensions([${JSON.stringify(join(source,'subagent-done.ts'))}],${JSON.stringify(dir)},createEventBus());
+    assert.deepEqual(childLoaded.errors,[]);
+    const child=childLoaded.extensions[0]; assert.ok(child.commands.has('subagents'));
+    h.ownership.revealOwnedSurface(b.surface,'b');
+    await child.commands.get('subagents').handler('hide',ctx);
+    assert.ok(!notes.some(note=>/Cannot hide/.test(note)),'worker hide must be acknowledged');
+    const hiddenCalls=readFileSync(process.env.FAKE_LOG,'utf8');
+    assert.match(hiddenCalls,/break-pane -d -s %worker2/);
+    h.ownership.revealOwnedSurface(b.surface,'b');
+    writeFileSync(process.env.FAIL_HIDE,'fail');
+    await child.commands.get('subagents').handler('hide',ctx);
+    assert.ok(notes.some(note=>/Cannot hide/.test(note)),'failed hide gives explicit feedback');
+    unlinkSync(process.env.FAIL_HIDE);notes.length=0;
+    await child.commands.get('subagents').handler('hide',ctx);
+    assert.equal(notes.length,0,'retry succeeds without stale state');
+    const beforeStale=readFileSync(process.env.FAKE_LOG,'utf8');
+    writeFileSync(b.sessionFile+'.pane-request',JSON.stringify({action:'hide',runId:'stale',requestId:'stale-request'}));
+    h.ownership.processOwnedPaneRequests();
+    assert.equal(readFileSync(process.env.FAKE_LOG,'utf8'),beforeStale,'stale run request cannot move panes');
+    const beforeNonTui=readFileSync(process.env.FAKE_LOG,'utf8');
+    await child.commands.get('subagents').handler('hide',{...ctx,mode:'json',hasUI:false});
+    assert.equal(readFileSync(process.env.FAKE_LOG,'utf8'),beforeNonTui);
+    writeFileSync(process.env.FAIL_JOIN,'fail');
+    assert.throws(()=>h.ownership.revealOwnedSurface(a.surface,'a')); unlinkSync(process.env.FAIL_JOIN);
+    h.ownership.revealOwnedSurface(a.surface,'a'); h.ownership.hideOwnedSurface();
+    writeFileSync(b.sessionFile+'.pending-question',JSON.stringify({runId:'b',questionId:'q',question:'Scope?',name:'beta',agent:'builder'}));
+    await shortcut.handler(ctx);
+    assert.match(render(),/needs input/i);
+    for(const width of [1,2,8,20,80]) assert.ok(widget(tui,{}).render(width).every(line=>visibleWidth(line)<=width));
+    assert.equal(input('\\x03'),undefined,'abort remains available while list is focused');
+    await shortcut.handler(ctx);render();overlay=true;
+    assert.equal(input('x'),undefined,'overlay input must not be consumed by list');overlay=false;
+    h.runningSubagents.delete('b');
+    h.pausedDeliveryRuns.set('b',{running:b});
+    await shortcut.handler(ctx); assert.match(render(),/paused; pane preserved/);
+    input('\\r');
+    assert.match(readFileSync(process.env.FAKE_LOG,'utf8'),/join-pane .*%worker2/,'paused owned pane remains selectable');
+    h.pausedDeliveryRuns.clear();
+    h.runningSubagents.delete('b'); input('\\r');
+    h.runningSubagents.clear(); await shortcut.handler(ctx);
+    assert.equal(input('x'),undefined,'last run disappearing releases prompt input');
+    await emit('session_start'); assert.equal(unsubscribed,1); assert.equal(subscribed,2);
+    await emit('session_shutdown'); assert.equal(unsubscribed,2);
+    await emit('session_start',{...ctx,mode:'json',hasUI:false}); assert.equal(subscribed,2);
+    const before=readFileSync(process.env.FAKE_LOG,'utf8');
+    await commands.get('subagents').handler('hide',{...ctx,mode:'json',hasUI:false});
+    assert.equal(readFileSync(process.env.FAKE_LOG,'utf8'),before);
+    await emit('session_shutdown',{...ctx,mode:'json',hasUI:false});
+    console.log('PASS inline UI and owned visibility; retained fixture '+${JSON.stringify(dir)});
+  `;
+  const result = spawnSync(process.execPath,['--input-type=module','-e',program],{cwd:dir,encoding:'utf8',timeout:15000,env:{...process.env,HOME:dir,PI_CODING_AGENT_DIR:join(dir,'agent'),PATH:bin+':/usr/bin:/bin',TMUX:'fake',TMUX_PANE:'%parent',FAKE_LOG:log,FAIL_HIDE:join(dir,'fail-hide'),FAIL_JOIN:join(dir,'fail-join'),PI_SUBAGENT_AGENT:'',PI_SUBAGENT_ALLOWED:'',PI_OFFLINE:'1'}});
+  console.log(`Retained fixture: ${dir}`);
+  assert.equal(result.status,0,result.stderr+'\n'+result.stdout);
+  const calls=readFileSync(log,'utf8');
+  assert.doesNotMatch(calls,/split-window|select-layout|kill-pane -t %parent|%unowned/);
+  assert.match(calls,/new-session -d -s pi-workers-/);
+  assert.match(calls,/new-window -d -t \$parking/);
+  assert.doesNotMatch(calls,/new-window -d -t \$test-session/);
+  assert.match(calls,/break-pane -d -s %worker2 -t \$parking:/);
+});

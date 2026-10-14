@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { keyHint } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, Text, truncateToWidth, visibleWidth, Key, matchesKey } from "@mariozechner/pi-tui";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -24,7 +24,7 @@ import {
   readScreen,
 } from "./tmux.ts";
 
-import { createOwnedSurface, closeOwnedSurface, rollbackOwnedLaunch, cleanupOwnedSurfaces } from "./surface-ownership.ts";
+import { createOwnedSurface, closeOwnedSurface, rollbackOwnedLaunch, cleanupOwnedSurfaces, revealOwnedSurface, hideOwnedSurface, processOwnedPaneRequests } from "./surface-ownership.ts";
 import { ExecutionDeadline } from "./execution-deadline.ts";
 
 import {
@@ -76,6 +76,7 @@ const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const RUNTIME_NAMESPACE = `pi-toolkit/delivery-tmux/${SUBAGENTS_DIR}`;
 const WIDGET_INTERVAL_KEY = Symbol.for(`${RUNTIME_NAMESPACE}/widget-interval`);
 const STATUS_INTERVAL_KEY = Symbol.for(`${RUNTIME_NAMESPACE}/status-interval`);
+const PANE_INTERVAL_KEY = Symbol.for(`${RUNTIME_NAMESPACE}/pane-interval`);
 const POLL_ABORT_KEY = Symbol.for(`${RUNTIME_NAMESPACE}/poll-abort-controller`);
 
 function initializeRuntime() {
@@ -89,6 +90,9 @@ function initializeRuntime() {
     clearInterval(prevStatusInterval);
     (globalThis as any)[STATUS_INTERVAL_KEY] = null;
   }
+  const prevPaneInterval = (globalThis as any)[PANE_INTERVAL_KEY];
+  if (prevPaneInterval) clearInterval(prevPaneInterval);
+  (globalThis as any)[PANE_INTERVAL_KEY] = null;
   const prevAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
   if (prevAbort) prevAbort.abort();
   // Reload retries orphan cleanup without dropping unsuccessful ownership.
@@ -672,6 +676,55 @@ interface RunningSubagent {
 /** All currently running subagents, keyed by id. */
 const runningSubagents = new Map<string, RunningSubagent>();
 
+/** A selected run id, rather than a row offset, survives status updates. */
+let selectedRunId: string | null = null;
+let listInputActive = false;
+let unsubscribeListInput: (() => void) | null = null;
+let widgetTui: { hasOverlay(): boolean } | null = null;
+
+function selectableSubagents(): Array<{ running: RunningSubagent; state: "running" | "paused" }> {
+  const live = [...runningSubagents.values()].map(running => ({ running, state: "running" as const }));
+  // A paused delivery worker leaves runningSubagents after its watcher exits,
+  // but its owned pane/session remains controllable until explicit stop.
+  const paused = [...pausedDeliveryRuns.values()]
+    .filter(({ running }) => !runningSubagents.has(running.id))
+    .map(({ running }) => ({ running, state: "paused" as const }));
+  return [...live, ...paused].sort((a, b) => a.running.startTime - b.running.startTime || a.running.id.localeCompare(b.running.id));
+}
+
+function ensureSelectedRun(): Array<{ running: RunningSubagent; state: "running" | "paused" }> {
+  const entries = selectableSubagents();
+  if (!entries.some(entry => entry.running.id === selectedRunId)) selectedRunId = entries[0]?.running.id ?? null;
+  return entries;
+}
+
+function needsInput(running: RunningSubagent): boolean {
+  const question = readJson(`${running.sessionFile}.pending-question`);
+  return isQuestion(question) && question.runId === running.id;
+}
+
+function moveListSelection(delta: number): void {
+  const entries = ensureSelectedRun();
+  if (!entries.length) return;
+  const current = Math.max(0, entries.findIndex(entry => entry.running.id === selectedRunId));
+  selectedRunId = entries[(current + delta + entries.length) % entries.length].running.id;
+  updateWidget();
+}
+
+function revealSelectedSubagent(): void {
+  const entry = ensureSelectedRun().find(candidate => candidate.running.id === selectedRunId);
+  if (!entry) return;
+  revealOwnedSurface(entry.running.surface, entry.running.id);
+  listInputActive = false;
+  updateWidget();
+}
+
+function hideSubagentDetail(): void {
+  hideOwnedSurface();
+  listInputActive = false;
+  updateWidget();
+}
+
 // The supported delivery entry point grants no nested spawning. Do not publish
 // the legacy upstream running-child callback: even module evaluation before a
 // refused startup must leave an independently installed runtime untouched.
@@ -757,27 +810,31 @@ function borderBottom(width: number): string {
 }
 
 function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): string[] {
-  const count = agents.length;
+  const entries = agents.map(running => ({ running, state: pausedDeliveryRuns.has(running.id) ? "paused" : "running" }));
+  const count = entries.length;
   const title = "Subagents";
-  const info = `${count} running`;
-
+  const info = `${count} active`;
   const lines: string[] = [borderTop(title, info, width)];
 
-  for (const agent of agents) {
+  for (const { running: agent, state } of entries) {
     const elapsed = formatElapsedMMSS(agent.startTime);
     const agentTag = agent.agent ? ` (${agent.agent})` : "";
     const snapshot = classifyStatus(agent.statusState, Date.now());
-    const icon = widgetIcon(snapshot.kind);
-    const left = ` ${icon} ${elapsed}  ${agent.name}${agentTag} `;
-    const right = statusConfig.enabled
-      ? formatWidgetRightLabel(snapshot)
-      : agent.cli === "claude"
-        ? " running… "
-        : " starting… ";
-
+    const attention = needsInput(agent);
+    const icon = state === "paused" ? "Ⅱ" : attention ? "!" : widgetIcon(snapshot.kind);
+    const marker = listInputActive && selectedRunId === agent.id ? ">" : " ";
+    const left = `${marker}${icon} ${elapsed}  ${agent.name}${agentTag} `;
+    const right = state === "paused"
+      ? " paused; pane preserved "
+      : attention ? " needs input · question "
+      : statusConfig.enabled
+        ? formatWidgetRightLabel(snapshot)
+        : agent.cli === "claude" ? " running… " : " starting… ";
     lines.push(borderLine(left, right, width));
   }
 
+  if (listInputActive && entries.length) lines.push(borderLine(" ↑/↓ select · Enter reveal · Esc return", "", width));
+  else lines.push(borderLine(" /subagents to select · /subagents hide", "", width));
   lines.push(borderBottom(width));
   return lines;
 }
@@ -785,7 +842,9 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
 function updateWidget() {
   if (!latestCtx?.hasUI) return;
 
-  if (runningSubagents.size === 0) {
+  if (selectableSubagents().length === 0) {
+    selectedRunId = null;
+    listInputActive = false;
     latestCtx.ui.setWidget("subagent-status", undefined);
     if (widgetInterval) {
       clearInterval(widgetInterval);
@@ -797,11 +856,12 @@ function updateWidget() {
 
   latestCtx.ui.setWidget(
     "subagent-status",
-    (_tui: any, _theme: any) => {
+    (tui: any, _theme: any) => {
+      widgetTui = tui;
       return {
         invalidate() {},
         render(width: number) {
-          return renderSubagentWidgetLines(Array.from(runningSubagents.values()), width);
+          return renderSubagentWidgetLines(ensureSelectedRun().map(entry => entry.running), width);
         },
       };
     },
@@ -1216,6 +1276,9 @@ export const __test__ = {
   contextWindowFor,
   formatUsageSegments,
   widgetIcon,
+  selectableSubagents,
+  hideSubagentDetail,
+  get pausedDeliveryRuns() { return pausedDeliveryRuns; },
 };
 
 function startWidgetRefresh() {
@@ -1225,6 +1288,21 @@ function startWidgetRefresh() {
     updateWidget();
   }, 1000);
   (globalThis as any)[WIDGET_INTERVAL_KEY] = widgetInterval;
+}
+
+function activateSubagentList(ctx: ExtensionContext): void {
+  if (ctx.mode !== "tui" || !ctx.hasUI) {
+    if (ctx.hasUI) ctx.ui.notify("Subagent selection is available in interactive TUI mode.", "info");
+    return;
+  }
+  if (!ensureSelectedRun().length) {
+    listInputActive = false;
+    updateWidget();
+    ctx.ui.notify("No active or preserved subagent panes.", "info");
+    return;
+  }
+  listInputActive = true;
+  updateWidget();
 }
 
 /**
@@ -1860,9 +1938,67 @@ export function cancelDeliveryRun(name: string, id: string, reason: string): voi
 export default function subagentsExtension(pi: ExtensionAPI) {
   initializeRuntime();
   latestPi = pi;
+
+  pi.registerCommand("subagents", {
+    description: "Focus the subagent list; /subagents hide parks the visible worker without stopping it.",
+    handler: async (args, ctx) => {
+      if (ctx.mode !== "tui" || !ctx.hasUI) return;
+      if (args.trim() && args.trim() !== "hide") {
+        ctx.ui.notify("Usage: /subagents [hide]", "info");
+        return;
+      }
+      if (args.trim() === "hide") {
+        try { hideSubagentDetail(); }
+        catch (error) { ctx.ui.notify(`Cannot hide subagent detail: ${String(error)}`, "error"); }
+        return;
+      }
+      activateSubagentList(ctx);
+    },
+  });
+
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
+    unsubscribeListInput?.();
+    unsubscribeListInput = null;
+    listInputActive = false;
+    widgetTui = null;
+    const prevPaneInterval = (globalThis as any)[PANE_INTERVAL_KEY];
+    if (prevPaneInterval) clearInterval(prevPaneInterval);
+    (globalThis as any)[PANE_INTERVAL_KEY] = null;
+    if (ctx.mode === "tui" && ctx.hasUI) {
+      const timer = setInterval(processOwnedPaneRequests, 250);
+      timer.unref();
+      (globalThis as any)[PANE_INTERVAL_KEY] = timer;
+    }
+    if (ctx.mode === "tui" && ctx.hasUI && ctx.ui) unsubscribeListInput = ctx.ui.onTerminalInput((data) => {
+      if (!listInputActive) return undefined;
+      // A dialog/overlay takes precedence; normal abort controls remain usable.
+      if (widgetTui?.hasOverlay?.() || matchesKey(data, Key.ctrl("c")) || matchesKey(data, Key.ctrl("g"))) {
+        listInputActive = false;
+        updateWidget();
+        return undefined;
+      }
+      if (!ensureSelectedRun().length) {
+        listInputActive = false;
+        updateWidget();
+        return undefined;
+      }
+      if (matchesKey(data, Key.up)) { moveListSelection(-1); return { consume: true }; }
+      if (matchesKey(data, Key.down)) { moveListSelection(1); return { consume: true }; }
+      if (matchesKey(data, Key.enter)) {
+        try { revealSelectedSubagent(); }
+        catch (error) { ctx.ui.notify(`Cannot reveal subagent pane: ${String(error)}`, "error"); }
+        return { consume: true };
+      }
+      if (matchesKey(data, Key.escape)) {
+        listInputActive = false;
+        updateWidget();
+        return { consume: true };
+      }
+      // While list focus is explicit, no prompt text or submissions leak through.
+      return { consume: true };
+    });
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.
@@ -1875,6 +2011,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // Clean up on session shutdown
   pi.on("session_shutdown", (_event, _ctx) => {
+    unsubscribeListInput?.();
+    unsubscribeListInput = null;
+    widgetTui = null;
+    listInputActive = false;
+    selectedRunId = null;
+    const paneInterval = (globalThis as any)[PANE_INTERVAL_KEY];
+    if (paneInterval) clearInterval(paneInterval);
+    (globalThis as any)[PANE_INTERVAL_KEY] = null;
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;

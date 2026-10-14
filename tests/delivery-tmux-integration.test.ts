@@ -54,7 +54,9 @@ for (const scenario of ["notification-evidence", "notification-error-evidence", 
     await writeFile(join(bin, "tmux"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_LOG"
 case "$1" in
- split-window) n=0; if [ -f "$FAKE_LOG.count" ]; then read n < "$FAKE_LOG.count"; fi; n=$((n+1)); printf '%s\\n' "$n" > "$FAKE_LOG.count"; printf '%%owned%s\\n' "$n" ;;
+ display-message) printf '$fake-session\\n' ;;
+ new-session) printf '$parking %%parking-anchor\\n' ;;
+ new-window) n=0; if [ -f "$FAKE_LOG.count" ]; then read n < "$FAKE_LOG.count"; fi; n=$((n+1)); printf '%s\\n' "$n" > "$FAKE_LOG.count"; printf '%%owned%s\\n' "$n" ;;
  send-keys) if [ -f "$FAIL_TRANSPORT" ]; then exit 23; fi ;;
  capture-pane) if [ -f "$DONE_FILE" ]; then printf '__SUBAGENT_DONE_${scenario === "notification-error-evidence" ? 7 : 0}__\\n'; fi ;;
  kill-pane) if [ -f "$FAIL_CLEANUP" ]; then exit 29; fi; exit 0 ;;
@@ -172,7 +174,7 @@ esac
       } else {
         await start(extension);
         assert.deepEqual([...extension.tools.keys()].sort(),['developer','scout','subagent','subagent_message','subagents_list'].sort());
-        assert.equal(extension.commands.size,0);
+        assert.deepEqual([...extension.commands.keys()],['subagents']);
         for(const tool of extension.tools.values()) {assert.equal(tool.definition.exposure,'model-only');assert.equal(tool.definition.executionMode,'parallel');}
         const rawCall=(name,args,context=ctx)=> {
           if(!api) return extension.tools.get(name).definition.execute('id',args,undefined,undefined,context);
@@ -656,7 +658,7 @@ esac
         }
       }
       if(existsSync(process.env.FAKE_LOG)) {
-        const log=readFileSync(process.env.FAKE_LOG,'utf8');assert.doesNotMatch(log,/select-layout|kill-pane -t %unowned|kill-pane -t %parent/);
+        const log=readFileSync(process.env.FAKE_LOG,'utf8');assert.doesNotMatch(log,/split-window|select-layout|kill-pane -t %unowned|kill-pane -t %parent/);
       }
     `;
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", program], {

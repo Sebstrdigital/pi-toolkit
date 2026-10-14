@@ -6,11 +6,14 @@
  * it, and poll for exit. Keeping the tmux calls isolated here means index.ts
  * stays testable without a multiplexer running.
  *
- * Panes are identified by tmux pane ids (e.g. `%12`). Splits always target
- * the parent pi's pane (`$TMUX_PANE`) so they follow the agent rather than
- * the user's focus.
+ * Panes are identified by tmux pane ids (e.g. `%12`). Worker panes live in
+ * a private detached parking session, not the parent's window list. The
+ * parent pane is captured when this runtime loads,
+ * so reveal/hide never follows a worker's inherited `$TMUX_PANE` or the
+ * user's current focus.
  */
 import { execFile, execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,91 +70,114 @@ export function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
-// ── Pane layout ──
-
-/**
- * tmux layout applied to the subagent window to keep panes evenly sized.
- * Switchable: "even-horizontal" (equal columns, matches Ctrl+b Alt+1),
- * "main-vertical" (big main pane + tiled column), "tiled" (grid).
- */
-const SUBAGENT_TMUX_LAYOUT = "even-horizontal";
-
-let rebalanceTimer: ReturnType<typeof setTimeout> | null = null;
-
-/**
- * Re-balance subagent panes so repeated splits don't leave them lopsided.
- * tmux halves the target pane on every split and dumps freed space onto a
- * neighbor on close, so without this panes drift to wildly uneven widths.
- * Applies SUBAGENT_TMUX_LAYOUT to the parent pi window. Debounced so a burst
- * of parallel spawns or staggered exits collapses into a single layout call,
- * and non-fatal: a cosmetic resize must never break spawning or watching.
- */
-function rebalanceSurfaces(hintPane?: string): void {
-  // Prefer the parent pi pane (stable; survives a closing subagent pane).
-  const target = process.env.TMUX_PANE ?? hintPane;
-  if (!target) return;
-  if (rebalanceTimer) clearTimeout(rebalanceTimer);
-  rebalanceTimer = setTimeout(() => {
-    rebalanceTimer = null;
-    try {
-      // -t <pane> resolves to that pane's window; does not change focus.
-      execFileSync("tmux", ["select-layout", "-t", target, SUBAGENT_TMUX_LAYOUT], {
-        encoding: "utf8",
-      });
-    } catch {
-      // Pane/window may be gone; balancing is best-effort.
-    }
-  }, 120);
-}
-
 // ── Surface primitives ──
 
-/**
- * Create a new pane for a subagent: a right split off the parent pi's pane,
- * so new panes follow the agent rather than the user's focus.
- * See https://github.com/HazAT/pi-interactive-subagents/issues/12
- *
- * Returns the new pane id (e.g. `%12`).
- */
-export function createSurface(name: string, options?: { rebalance?: boolean }): string {
-  void name; // tmux panes are not named; the pi process inside shows its own title.
-  return createSurfaceSplit(name, "right", process.env.TMUX_PANE, options);
+/** Parent ownership is fixed before any child inherits and changes TMUX_PANE. */
+const PARENT_PANE = process.env.TMUX_PANE;
+
+// Retain parking ownership across same-process module reloads, like surface ownership.
+const PARKING_KEY = Symbol.for(`pi-toolkit/delivery-tmux/parking/${import.meta.url}`);
+interface ParkingState {
+  session?: string;
+  anchor?: string;
+  workers: Set<string>;
+  closed: Set<string>;
+  parentSize?: { surface: string; width: number; height: number; windowWidth: number; windowHeight: number };
+}
+const globals = globalThis as typeof globalThis & { [PARKING_KEY]?: ParkingState };
+const parking = globals[PARKING_KEY] ??= { workers: new Set<string>(), closed: new Set<string>() };
+parking.closed ??= new Set<string>(); // Retained earlier parking snapshots have no close markers.
+
+function parentSession(): string {
+  if (!PARENT_PANE) throw new Error("Parent tmux pane is unavailable; cannot manage worker detail safely");
+  const session = execFileSync("tmux", ["display-message", "-p", "-t", PARENT_PANE, "#{session_id}"], { encoding: "utf8" }).trim();
+  if (!session) throw new Error("Parent tmux session is unavailable; cannot manage worker detail safely");
+  return session;
 }
 
-/**
- * Create a new split in the given direction from an optional source pane.
- * Returns the new pane id (e.g. `%12`).
- */
-export function createSurfaceSplit(
-  name: string,
-  direction: "left" | "right" | "up" | "down",
-  fromSurface?: string,
-  options?: { rebalance?: boolean },
-): string {
-  void name;
+function parkingSession(): string {
+  if (!parking.session) {
+    // A keeper pane makes the last revealed worker hideable without restarting it.
+    // Allocate a fresh name; never adopt another runtime's parking session.
+    const output = execFileSync("tmux", ["new-session", "-d", "-s", `pi-workers-${randomUUID()}`,
+      "-n", "parking", "-P", "-F", "#{session_id} #{pane_id}", "/bin/sh"], { encoding: "utf8" }).trim();
+    const [session, anchor] = output.split(/\s+/);
+    if (!session?.startsWith("$") || !anchor?.startsWith("%")) throw new Error(`Unexpected tmux new-session output: ${output}`);
+    parking.session = session; parking.anchor = anchor;
+  }
+  return parking.session;
+}
+
+export function closeIdleParking(): void {
+  if (parking.workers.size || !parking.anchor) return;
+  // Close only our keeper pane, not a session that could contain other panes.
+  execFileSync("tmux", ["kill-pane", "-t", parking.anchor], { encoding: "utf8" });
+  parking.session = undefined; parking.anchor = undefined;
+}
+
+export function createSurface(name: string, _options?: { rebalance?: boolean }): string {
   requireTmux();
+  parentSession(); // Prove the caller still exists before allocating resources.
+  const safeName = `pi-worker-${name.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 32) || "subagent"}`;
+  try {
+    const pane = execFileSync("tmux", ["new-window", "-d", "-t", parkingSession(), "-n", safeName, "-P", "-F", "#{pane_id}"], {
+      encoding: "utf8",
+    }).trim();
+    if (!pane.startsWith("%")) throw new Error(`Unexpected tmux new-window output: ${pane}`);
+    parking.workers.add(pane);
+    return pane;
+  } catch (error) {
+    try { closeIdleParking(); } catch { /* Retain the owned anchor for retry. */ }
+    throw error;
+  }
+}
 
-  const args = ["split-window", "-d"];
-  if (direction === "left" || direction === "right") {
-    args.push("-h");
-  } else {
-    args.push("-v");
-  }
-  if (direction === "left" || direction === "up") {
-    args.push("-b");
-  }
-  if (fromSurface) {
-    args.push("-t", fromSurface);
-  }
-  args.push("-P", "-F", "#{pane_id}");
+function dimensions(format: string): number[] {
+  const values = execFileSync("tmux", ["display-message", "-p", "-t", PARENT_PANE!, format], { encoding: "utf8" })
+    .trim().split(/\s+/).map(Number);
+  if (values.length !== format.split(" ").length || values.some(value => !Number.isFinite(value) || value <= 0)) throw new Error("Parent tmux pane geometry is unavailable");
+  return values;
+}
 
-  const pane = execFileSync("tmux", args, { encoding: "utf8" }).trim();
-  if (!pane.startsWith("%")) {
-    throw new Error(`Unexpected tmux split-window output: ${pane}`);
-  }
+function restoreParentSize(): void {
+  const size = parking.parentSize;
+  if (!size) return;
+  const [width, height] = dimensions("#{window_width} #{window_height}");
+  // Restore only the caller's share; scale it if the user resized the window.
+  execFileSync("tmux", ["resize-pane", "-t", PARENT_PANE!,
+    "-x", String(Math.max(1, Math.round(size.width * width / size.windowWidth))),
+    "-y", String(Math.max(1, Math.round(size.height * height / size.windowHeight)))], { encoding: "utf8" });
+  parking.parentSize = undefined;
+}
 
-  if (options?.rebalance !== false) rebalanceSurfaces(pane);
-  return pane;
+/** Move a detached owned worker beside the captured parent pane without restarting it. */
+export function revealSurface(surface: string): void {
+  requireTmux();
+  if (!PARENT_PANE) throw new Error("Parent tmux pane is unavailable; cannot reveal worker detail safely");
+  restoreParentSize(); // Retry a previous failed restore before another reveal.
+  const [width, height, windowWidth, windowHeight] = dimensions("#{pane_width} #{pane_height} #{window_width} #{window_height}");
+  execFileSync("tmux", ["join-pane", "-h", "-s", surface, "-t", PARENT_PANE], { encoding: "utf8" });
+  parking.parentSize = { surface, width, height, windowWidth, windowHeight };
+}
+
+/** Focus is separate so a focus failure cannot lose ownership of a successful join. */
+export function focusSurface(surface: string): void {
+  requireTmux();
+  execFileSync("tmux", ["select-pane", "-t", surface], { encoding: "utf8" });
+}
+
+export function focusParentSurface(): void {
+  requireTmux();
+  parentSession();
+  restoreParentSize();
+  execFileSync("tmux", ["select-pane", "-t", PARENT_PANE!], { encoding: "utf8" });
+}
+
+/** Park the shown worker outside the parent's session, preserving its pane and PID. */
+export function hideSurface(surface: string): void {
+  requireTmux();
+  parentSession(); // prove the captured parent still exists before moving anything
+  execFileSync("tmux", ["break-pane", "-d", "-s", surface, "-t", `${parkingSession()}:`], { encoding: "utf8" });
 }
 
 /**
@@ -233,10 +259,18 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
 /**
  * Close a pane.
  */
-export function closeSurface(surface: string, options?: { rebalance?: boolean }): void {
+export function closeSurface(surface: string, _options?: { rebalance?: boolean }): void {
   requireTmux();
-  execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
-  if (options?.rebalance !== false) rebalanceSurfaces();
+  // Only successful kill-pane proves closure. A retained pre-parking owned pane
+  // need not be registered in workers; absence from that Set is not evidence.
+  if (!parking.closed.has(surface)) {
+    execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
+    parking.workers.delete(surface);
+    parking.closed.add(surface);
+  }
+  if (parking.parentSize?.surface === surface) restoreParentSize();
+  closeIdleParking();
+  parking.closed.delete(surface);
 }
 
 // ── Exit polling ──

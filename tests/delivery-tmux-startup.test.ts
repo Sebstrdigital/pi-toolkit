@@ -36,9 +36,11 @@ test("accepted runtime closes a created pane when launch transport fails", async
   await writeFile(join(bin, "tmux"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_TMUX_LOG"
 case "$1" in
-  split-window) printf '%%fake-owned\\n'; exit 0 ;;
+  display-message) printf '$fake-session\\n'; exit 0 ;;
+  new-session) printf '$parking %%parking-anchor\\n'; exit 0 ;;
+  new-window) printf '%%fake-owned\\n'; exit 0 ;;
   send-keys) exit 23 ;;
-  kill-pane|select-layout) exit 0 ;;
+  kill-pane) exit 0 ;;
   *) exit 24 ;;
 esac
 `, { mode: 0o755 });
@@ -85,8 +87,9 @@ esac
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /send-keys/, "Transport failure must be reproduced before asserting cleanup");
   const calls = await readFile(log, "utf8");
-  assert.match(calls, /split-window/, "Probe must create only the fake owned surface");
+  assert.match(calls, /new-window -d/, "Probe must create only a detached fake owned worker window");
+  assert.doesNotMatch(calls, /split-window|select-layout/, "Worker launch must not alter the parent layout");
   assert.match(calls, /kill-pane -t %fake-owned/, "Launch failure and shutdown must close the created owned pane");
-  assert.doesNotMatch(calls, /select-layout/, "Delivery split and rollback must not retile the parent window");
-  assert.equal((calls.match(/kill-pane/g) ?? []).length, 1, "Successful rollback is idempotent on shutdown");
+  assert.equal((calls.match(/kill-pane -t %fake-owned/g) ?? []).length, 1, "Successful worker rollback is idempotent on shutdown");
+  assert.equal((calls.match(/kill-pane -t %parking-anchor/g) ?? []).length, 1, "Idle keeper is closed exactly once");
 });
