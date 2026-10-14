@@ -1,19 +1,28 @@
 import { existsSync, lstatSync, readlinkSync, readFileSync, mkdirSync, symlinkSync, writeFileSync, copyFileSync, chmodSync, mkdtempSync, readdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve, join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mcpConfig, validateContextServer } from './generalist-context.mjs';
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const agent = resolve(process.env.HOME, '.pi/agent');
-const options = new Set(process.argv.slice(2));
+const rawOptions = process.argv.slice(2);
+const contextOption = rawOptions.find(option => option.startsWith('--with-generalist-context='));
+const options = new Set(rawOptions.filter(option => !option.startsWith('--with-generalist-context=')));
 for (const option of options) if (!['--with-delivery-tmux', '--with-progress', '--hide-thinking', '--with-one-pager'].includes(option)) throw Error(`Unknown option: ${option}`);
+if (contextOption && !contextOption.slice('--with-generalist-context='.length)) throw Error('--with-generalist-context requires an absolute Context Mode build/server.js path');
+const contextServer = contextOption?.slice('--with-generalist-context='.length);
+if (contextServer && !isAbsolute(contextServer)) throw Error('--with-generalist-context requires an absolute Context Mode build/server.js path');
+if (contextServer) validateContextServer(contextServer);
 const links = [['agent/AGENTS.md', 'AGENTS.md'], ...['debug','grill-me','zoom-out','duadigital-pdf-maker','homelab-validation','delivery','discovery','addy-engineering'].map(n=>[`skills/${n}`,`skills/${n}`]), ['extensions/delivery-worker','extensions/delivery-worker']];
 if (options.has('--with-delivery-tmux')) links.push(['extensions/delivery-tmux','extensions/delivery-tmux']);
 if (options.has('--with-progress')) links.push(['extensions/lean-progress','extensions/lean-progress']);
 if (options.has('--with-one-pager')) links.push(['skills/one-pager','skills/one-pager'], ['extensions/one-pager','extensions/one-pager']);
+if (contextServer) links.push(['extensions/pace-alias','extensions/pace-alias']);
 const present = p => existsSync(p) || (()=>{try { lstatSync(p); return true; } catch(e) { if(e.code==='ENOENT') return false; throw e; }})();
 // Preflight ALL destinations and parent directories before any user mutation.
 for (const parent of [resolve(process.env.HOME,'.pi'), agent, resolve(agent,'skills'), resolve(agent,'extensions')]) {
   if (present(parent) && (!lstatSync(parent).isDirectory() || lstatSync(parent).isSymbolicLink())) throw Error(`Refusing non-directory or symlink parent: ${parent}`);
 }
+if (contextServer && present(resolve(agent, 'prompts/pace.md'))) throw Error(`Refusing to shadow existing /pace prompt: ${resolve(agent, 'prompts/pace.md')}`);
 const missing = [];
 for (const [source, target] of links) {
   const p = resolve(agent,target), s = resolve(root,source);
@@ -22,7 +31,20 @@ for (const [source, target] of links) {
   } else missing.push([s,p]);
 }
 const settingsPath = resolve(agent,'settings.json');
-let original = null, updated = null;
+const mcpPath = resolve(agent,'mcp.json');
+let original = null, updated = null, mcpOriginal = null, mcpUpdated = null;
+if (contextServer) {
+  if (present(mcpPath)) {
+    if (!lstatSync(mcpPath).isFile() || lstatSync(mcpPath).isSymbolicLink()) throw Error('Refusing non-regular mcp.json');
+    mcpOriginal = readFileSync(mcpPath, 'utf8');
+  }
+  const mcp = JSON.parse(mcpOriginal ?? '{}\n');
+  if (!mcp || Array.isArray(mcp) || typeof mcp !== 'object' || (mcp.mcpServers !== undefined && (!mcp.mcpServers || Array.isArray(mcp.mcpServers) || typeof mcp.mcpServers !== 'object'))) throw Error('mcp.json mcpServers must be an object');
+  const servers = mcp.mcpServers ?? {};
+  for (const name of Object.keys(servers)) if (['jcodemunch', 'context_mode'].includes(name.replaceAll('-', '_'))) throw Error(`Refusing to overwrite MCP server: ${name}`);
+  Object.assign(servers, mcpConfig({ contextServer }).mcpServers);
+  mcp.mcpServers = servers; mcpUpdated = JSON.stringify(mcp, null, 2) + '\n';
+}
 if (options.has('--with-progress') || options.has('--hide-thinking')) {
   if (present(settingsPath)) {
     if (!lstatSync(settingsPath).isFile() || lstatSync(settingsPath).isSymbolicLink()) throw Error('Refusing non-regular settings.json');
@@ -57,14 +79,16 @@ if (options.has('--with-progress') || options.has('--hide-thinking')) {
     else updated=raw.slice(0,pos)+(spans.size?',':'')+'"hideThinkingBlock": true'+raw.slice(pos);
   }
 }
-if (!missing.length && updated===null) process.exit(0);
+if (!missing.length && updated===null && mcpUpdated===null) process.exit(0);
 mkdirSync(agent,{recursive:true});
 const backup=mkdtempSync(join(agent,'toolkit-backup-'));chmodSync(backup,0o700);
 if (updated!==null && original!==null) {copyFileSync(settingsPath,join(backup,'settings.json'));chmodSync(join(backup,'settings.json'),lstatSync(settingsPath).mode & 0o777);}
-writeFileSync(join(backup,'manifest.json'),JSON.stringify({root,settingsChanged:updated!==null,settingsExisted:original!==null,newLinks:missing},null,2)+'\n',{mode:0o600});
+if (mcpUpdated!==null && mcpOriginal!==null) {copyFileSync(mcpPath,join(backup,'mcp.json'));chmodSync(join(backup,'mcp.json'),lstatSync(mcpPath).mode & 0o777);}
+writeFileSync(join(backup,'manifest.json'),JSON.stringify({root,settingsChanged:updated!==null,settingsExisted:original!==null,mcpChanged:mcpUpdated!==null,mcpExisted:mcpOriginal!==null,newLinks:missing},null,2)+'\n',{mode:0o600});
 mkdirSync(resolve(agent,'skills'),{recursive:true});mkdirSync(resolve(agent,'extensions'),{recursive:true});
 for (const [source,target] of missing) symlinkSync(source,target);
 if (updated!==null) writeFileSync(settingsPath,updated,{mode:0o600});
+if (mcpUpdated!==null) writeFileSync(mcpPath,mcpUpdated,{mode:0o600});
 console.log(`Toolkit backup/rollback manifest: ${backup}`);
 // Preflight avoids known partial failures, not a global transaction: filesystem
 // failures or concurrent changes can still interrupt these sequential writes.

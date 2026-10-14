@@ -37,6 +37,31 @@ test("Pi natively discovers one adapted six-phase skill, not 25 upstream instruc
   assert.ok(!discovered.skills.some((s: any) => s.name === "spec-driven-development"));
 });
 
+test("PACE is discoverable and continues the existing cycle without expanding authority", async () => {
+  const { loadSkills, formatSkillsForPrompt } = await hostModule("skills");
+  const loaded = loadSkills({ cwd: root, agentDir: join(root, "not-an-agent-dir"), includeDefaults: false, skillPaths: [join(root, skillPath)] });
+  assert.deepEqual(loaded.diagnostics, []);
+  assert.deepEqual(loaded.skills.map((s: any) => s.name), ["addy-engineering"]);
+  assert.match(formatSkillsForPrompt(loaded.skills), /PACE\/pace/);
+  const source = await read(skillPath);
+  for (const rule of [/## PACE/, /next unfinished phase/i, /approved PLAN.*BUILD/i, /do not repeat settled/i, /ordinary.*repairs/i, /does not.*invent.*task/i, /does not.*commit.*installation.*release/i]) assert.match(source, rule);
+  assert.match(await read("agent/AGENTS.md"), /PACE\/pace.*loads addy-engineering/);
+  assert.match(await read("docs/addy-engineering.md"), /\/skill:addy-engineering PACE/);
+});
+
+test("explicit PACE invocation reads current skill text even with an older discovery description", async () => {
+  const { loadSkills } = await hostModule("skills");
+  const { AgentSession } = await hostModule("agent-session");
+  const loaded = loadSkills({ cwd: root, agentDir: join(root, "not-an-agent-dir"), includeDefaults: false, skillPaths: [join(root, skillPath)] });
+  const cached = { ...loaded, skills: loaded.skills.map((s: any) => ({ ...s, description: "Guide the six-phase cycle." })) };
+  const task = "PACE. Continue the approved plan from the next unfinished phase.";
+  // Pure command expansion with a fixture receiver: no session/provider/reload.
+  const expanded = AgentSession.prototype._expandSkillCommand.call({ resourceLoader: { getSkills: () => cached } }, "/skill:addy-engineering " + task);
+  assert.match(expanded, /## PACE/);
+  assert.match(expanded, /approved PLAN.*BUILD/i);
+  assert.ok(expanded.endsWith(task));
+});
+
 test("installed directory aliases resolve external references through the physical skill directory", async t => {
   const dir = await mkdtemp(join(tmpdir(), "addy-skill-alias-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -2,6 +2,33 @@
 
 The discoverable [addy-engineering skill](../skills/addy-engineering/SKILL.md) adapts Addy Osmani's DEFINE → PLAN → BUILD → VERIFY → REVIEW → SHIP discipline to Pi. A user can ask for a six-phase/six-step cycle or structured engineering workflow without knowing Addy’s name. It uses the existing model-only worker tools over the [extracted execution service](execution-service.md); it adds no executable extension, worker grant, routing change, scheduler, install flag or default policy replacement.
 
+## PACE: the conversational alias
+
+Say **"let's use PACE"**, **"PACE on the approved plan"**, or **"continue with
+pace"** to select this same cycle at its next unfinished phase. PACE is
+case-insensitive and refers to the engineering workflow, not execution speed.
+It reuses settled context and existing approvals: an approved PLAN normally
+continues at BUILD, then VERIFY, REVIEW and SHIP for handoff. It does not restart
+planning, invent work after completion, override an explicit hold or expand
+commit/installation/private-data/release permissions.
+
+The skill's discovery description and toolkit agent guidance advertise this
+alias for newly loaded resources. An already-running session may still have the
+old description or previously loaded instructions. If `addy-engineering` was
+already discovered there, explicitly invoke it to read the current file:
+
+```text
+/skill:addy-engineering PACE. Continue the approved plan from the next unfinished phase, preserving its boundaries; do not repeat settled planning.
+```
+
+Conversational PACE remains a workflow selector, not a `/skill:pace` skill. The optional [generalist retrieval setup](generalist-context.md) now supplies a thin `/pace` command that forwards to this same canonical skill.
+If the current session did not discover the skill, ask it to read the approved
+checkout's `skills/addy-engineering/SKILL.md` explicitly, or select it in a fresh
+reviewed session. Do not reload or control an ongoing task merely to refresh
+this wording. Native command expansion/current-file loading is tested with a
+fixture receiver; natural-language selection and phase judgment are model
+behavior, not a deterministic dispatcher or a live-session guarantee.
+
 ## What is included
 
 - One adapted active instruction path with autonomous slices and root-cause repair.

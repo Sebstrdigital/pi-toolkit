@@ -1,6 +1,6 @@
 ---
 name: addy-engineering
-description: Guide substantial engineering through DEFINE, PLAN, BUILD, VERIFY, REVIEW, SHIP; use when the user asks for a six-phase/six-step cycle, a structured engineering workflow, or an understood brainstorming direction needs a proportionate plan.
+description: Guide substantial engineering through DEFINE, PLAN, BUILD, VERIFY, REVIEW, SHIP; use when the user says PACE/pace ("let's use pace", "continue with pace") for their engineering workflow, asks for a six-phase/six-step cycle, or an understood brainstorming direction needs a proportionate plan.
 license: MIT upstream references; see ../../vendor/addy-agent-skills/LICENSE
 ---
 
@@ -13,6 +13,37 @@ Pi may advertise this skill through an installed directory symlink. Resolve the 
 Read [Pi adaptations](references/pi-adaptations.md) before upstream material. This skill and those adaptations are the active workflow; the pinned sources are supporting engineering references, not a second instruction path. Keep old entry points available, but do not invoke conflicting old workflow skills/commands for the same task. Higher-priority instructions, actual user authority and project rules remain binding. Resolve a consequential conflict instead of claiming this Markdown overrides system policy.
 
 Use proportionate Direct, Developer or Team mechanics already available. No mode-selection ritual or separate Agreement for settled execution authority. When delegating, read [execution mapping](references/execution.md); use existing fixed-role tools over the extracted service. No nesting, silent fallback or automatic cross-model offers.
+
+## PACE — pick up the engineering cycle
+
+**PACE** (case-insensitive) is the conversational alias for this same workflow,
+not another skill, slash command, scheduler or release action. Requests such as
+"let's use pace", "PACE on the approved plan", or "continue with pace" select it;
+ordinary mentions of execution speed or the word "pace" do not.
+
+Read the current task context, latest outcome/handoff, project rules and source
+state; identify the next unfinished phase and continue there. Do not repeat settled
+DEFINE/PLAN work. An approved PLAN normally enters BUILD; completed implementation
+enters VERIFY, verified work enters REVIEW, and accepted reviewed work enters
+SHIP for handoff. Resolve outstanding checks or review findings before advancing.
+If the task is already complete, report its outcome and gaps rather than inventing
+a new task. PACE does not authorize inventing a task or override a hold, explicit
+limit, conflicting higher-priority rule, or unresolved consequential decision.
+
+A clear PACE continuation request for an understood approved task authorizes
+ordinary reversible implementation, verification and in-scope repairs under the
+existing boundaries. Bare workflow selection without an understood task does not.
+PACE does not grant commit, installation, reload, deletion, publication or release
+permission. Keep the phase guidance and proportionate review gates below.
+
+When the optional `ask_user` tool is available, prefer its keyboard picker for a
+genuine unresolved consequential decision or missing permission. Show the exact
+scope and exclusions; offer clear proceed/hold choices and custom text when useful.
+Do not ask again for settled authority or add prompts between every phase. Cancel,
+timeout, skipped entries, invalid results and tool errors are not approval; interpret
+freeform answers rather than treating them as Yes. Never batch an unresolved
+permission question with dependent mutation calls. If the tool is unavailable,
+ask in ordinary text; PACE does not require the picker or grant installation/reload.
 
 ## DEFINE — understand the outcome
 
